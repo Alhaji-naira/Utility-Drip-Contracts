@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contracttype, contractimpl, Address, Env, token};
+use soroban_sdk::{contract, contracttype, contractimpl, Address, Env, token, Symbol};
 
 #[contracttype]
 #[derive(Clone)]
@@ -57,11 +57,17 @@ impl UtilityContract {
         let client = token::Client::new(&env, &meter.token);
         client.transfer(&meter.user, &env.current_contract_address(), &amount);
 
+        let was_active = meter.balance > 0;
         meter.balance += amount;
         meter.is_active = true;
-        meter.last_update = env.ledger().timestamp();
+        let now = env.ledger().timestamp();
+        meter.last_update = now;
         
         env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+
+        if !was_active && meter.balance > 0 {
+            env.events().publish((Symbol::new(&env, "MeterActive"), meter_id), now);
+        }
     }
 
     pub fn claim(env: Env, meter_id: u64) {
@@ -79,6 +85,8 @@ impl UtilityContract {
             amount
         };
 
+        let was_active = meter.balance > 0;
+
         if claimable > 0 {
             let client = token::Client::new(&env, &meter.token);
             client.transfer(&env.current_contract_address(), &meter.provider, &claimable);
@@ -91,6 +99,10 @@ impl UtilityContract {
         }
 
         env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+
+        if was_active && meter.balance <= 0 {
+            env.events().publish((Symbol::new(&env, "MeterInactive"), meter_id), now);
+        }
     }
 
     pub fn get_meter(env: Env, meter_id: u64) -> Option<Meter> {
