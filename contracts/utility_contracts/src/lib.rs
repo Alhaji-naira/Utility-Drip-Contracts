@@ -109,7 +109,26 @@ impl UtilityContract {
 
         let mut meter: Meter = env.storage().instance().get(&DataKey::Meter(meter_id)).ok_or("Meter not found").unwrap();
         
-        let cost = units_consumed * meter.rate_per_unit;
+        let now = env.ledger().timestamp();
+        // Reset hourly cap if 1 hour passed since last reset
+        if now.checked_sub(meter.last_claim_time).unwrap_or(0) >= 3600 {
+            meter.claimed_this_hour = 0;
+            meter.last_claim_time = now;
+        }
+
+        let mut cost = units_consumed * meter.rate_per_unit;
+        
+        // Enforce max flow rate hourly cap
+        let remaining_this_hour = if meter.max_flow_rate_per_hour > meter.claimed_this_hour {
+            meter.max_flow_rate_per_hour - meter.claimed_this_hour
+        } else {
+            0
+        };
+        
+        if cost > remaining_this_hour {
+            cost = remaining_this_hour;
+        }
+
         let was_active = meter.balance > 0;
         
         if cost > 0 {
@@ -123,11 +142,11 @@ impl UtilityContract {
                 let client = token::Client::new(&env, &meter.token);
                 client.transfer(&env.current_contract_address(), &meter.provider, &actual_claim);
                 meter.balance -= actual_claim;
+                meter.claimed_this_hour += actual_claim;
             }
         }
 
-        let now = env.ledger().timestamp();
-        meter.last_update = now;
+        meter.last_update = env.ledger().timestamp();
         if meter.balance <= 0 {
             meter.is_active = false;
         }
@@ -143,6 +162,13 @@ impl UtilityContract {
             (Symbol::new(&env, "UsageReported"), meter_id),
             (units_consumed, cost)
         );
+    }
+
+    pub fn set_max_flow_rate(env: Env, meter_id: u64, amount: i128) {
+        let mut meter: Meter = env.storage().instance().get(&DataKey::Meter(meter_id)).ok_or("Meter not found").unwrap();
+        meter.provider.require_auth();
+        meter.max_flow_rate_per_hour = amount;
+        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
     }
 
     pub fn update_usage(env: Env, meter_id: u64, watt_hours_consumed: i128) {
