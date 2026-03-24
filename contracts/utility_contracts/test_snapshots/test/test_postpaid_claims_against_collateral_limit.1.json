@@ -38,7 +38,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "i128": "1000"
+                  "i128": "500"
                 }
               ]
             }
@@ -54,7 +54,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "register_meter",
+              "function_name": "register_meter_with_mode",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -67,6 +67,13 @@
                 },
                 {
                   "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
+                },
+                {
+                  "vec": [
+                    {
+                      "symbol": "PostPaid"
+                    }
+                  ]
                 }
               ]
             }
@@ -75,7 +82,6 @@
         }
       ]
     ],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -89,7 +95,7 @@
                   "u64": "1"
                 },
                 {
-                  "i128": "500"
+                  "i128": "300"
                 }
               ]
             }
@@ -108,7 +114,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                     },
                     {
-                      "i128": "500"
+                      "i128": "300"
                     }
                   ]
                 }
@@ -121,7 +127,6 @@
     ],
     [],
     [],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
@@ -165,78 +170,12 @@
     ],
     [],
     [],
-    [],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "update_usage",
-              "args": [
-                {
-                  "u64": "1"
-                },
-                {
-                  "i128": "1500"
-                }
-              ]
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ],
-    [],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "reset_cycle_usage",
-              "args": [
-                {
-                  "u64": "1"
-                }
-              ]
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ],
-    [],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "update_usage",
-              "args": [
-                {
-                  "u64": "1"
-                },
-                {
-                  "i128": "2000"
-                }
-              ]
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ],
     []
   ],
   "ledger": {
     "protocol_version": 25,
     "sequence_number": 0,
-    "timestamp": 60,
+    "timestamp": 35,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -334,10 +273,38 @@
                           },
                           {
                             "key": {
+                              "symbol": "billing_type"
+                            },
+                            "val": {
+                              "vec": [
+                                {
+                                  "symbol": "PostPaid"
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "claimed_this_hour"
                             },
                             "val": {
-                              "i128": "500"
+                              "i128": "300"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "collateral_limit"
+                            },
+                            "val": {
+                              "i128": "300"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "debt"
+                            },
+                            "val": {
+                              "i128": "300"
                             }
                           },
                           {
@@ -369,7 +336,7 @@
                               "symbol": "last_update"
                             },
                             "val": {
-                              "u64": "60"
+                              "u64": "35"
                             }
                           },
                           {
@@ -415,7 +382,7 @@
                                     "symbol": "current_cycle_watt_hours"
                                   },
                                   "val": {
-                                    "i128": "2000000"
+                                    "i128": "0"
                                   }
                                 },
                                 {
@@ -423,7 +390,7 @@
                                     "symbol": "last_reading_timestamp"
                                   },
                                   "val": {
-                                    "u64": "60"
+                                    "u64": "0"
                                   }
                                 },
                                 {
@@ -431,7 +398,7 @@
                                     "symbol": "peak_usage_watt_hours"
                                   },
                                   "val": {
-                                    "i128": "2000000"
+                                    "i128": "0"
                                   }
                                 },
                                 {
@@ -447,7 +414,7 @@
                                     "symbol": "total_watt_hours"
                                   },
                                   "val": {
-                                    "i128": "3500000"
+                                    "i128": "0"
                                   }
                                 }
                               ]
@@ -519,46 +486,6 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "5806905060045992000"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "8370022561469687789"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
               "key": {
                 "ledger_key_nonce": {
@@ -583,26 +510,6 @@
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "4270020994084947596"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "6277191135259896685"
                 }
               },
               "durability": "temporary",
@@ -710,7 +617,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "500"
+                      "i128": "200"
                     }
                   },
                   {
@@ -762,7 +669,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "500"
+                      "i128": "300"
                     }
                   },
                   {
