@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, Env,
+    Address, Env, Symbol,
 };
 
 #[contracttype]
@@ -30,6 +30,8 @@ pub struct Meter {
     pub billing_type: BillingType,
     pub off_peak_rate: i128,      // rate per second during off-peak hours
     pub peak_rate: i128,          // rate per second during peak hours (1.5x off-peak)
+    pub rate_per_second: i128,
+    pub rate_per_unit: i128,
     pub balance: i128,
     pub debt: i128,
     pub collateral_limit: i128,
@@ -296,6 +298,8 @@ impl UtilityContract {
             billing_type,
             off_peak_rate,
             peak_rate,
+            rate_per_second: rate,
+            rate_per_unit: rate,
             balance: 0,
             debt: 0,
             collateral_limit: 0,
@@ -399,6 +403,18 @@ impl UtilityContract {
         let effective_rate = get_effective_rate(&meter, now);
         let requested = units_consumed.saturating_mul(effective_rate);
         let claimable = requested
+        // Peak hour tariff logic from Issue #13
+        let current_hour = (now % 86400) / 3600;
+        let is_peak = current_hour >= 18 && current_hour < 22; // 6 PM to 10 PM UTC
+        let base_cost = units_consumed.saturating_mul(meter.rate_per_unit);
+        let cost = if is_peak {
+            base_cost.saturating_mul(15) / 10
+        } else {
+            base_cost
+        };
+
+        // Enforce max flow rate hourly cap and available funds
+        let claimable = cost
             .min(remaining_claim_capacity(&meter))
             .min(provider_meter_value(&meter));
 
@@ -474,16 +490,13 @@ impl UtilityContract {
             .get(&DataKey::ProviderWindow(provider))
     }
 
-    pub fn get_watt_hours_display(precise_watt_hours: i128, precision_factor: i128) -> i128 {
-        precise_watt_hours / precision_factor
-    }
-
     pub fn calculate_expected_depletion(env: Env, meter_id: u64) -> Option<u64> {
         env.storage()
             .instance()
             .get::<DataKey, Meter>(&DataKey::Meter(meter_id))
             .map(|meter| {
                 if meter.off_peak_rate <= 0 {
+                if meter.rate_per_unit <= 0 {
                     return 0;
                 }
 
@@ -493,6 +506,8 @@ impl UtilityContract {
                 }
 
                 env.ledger().timestamp() + (available / meter.off_peak_rate) as u64
+                env.ledger().timestamp()
+                    + (available / meter.rate_per_unit) as u64
             })
     }
 
@@ -521,6 +536,10 @@ impl UtilityContract {
             }
             None => true,
         }
+    }
+
+    pub fn get_watt_hours_display(watt_hours: i128, precision_factor: i128) -> i128 {
+        watt_hours / precision_factor
     }
 }
 
