@@ -1,8 +1,8 @@
 #![no_std]
 use soroban_sdk::{contract, contracttype, contractimpl, Address, Env, token, Symbol};
 
-// Minimum balance required to keep the IoT relay open (5 XLM equivalent)
-const MINIMUM_BALANCE_TO_FLOW: i128 = 5000000; // 5 XLM in stroops (1 XLM = 10^7 stroops)
+// Minimum balance required to keep the IoT relay open (500 tokens for testing)
+const MINIMUM_BALANCE_TO_FLOW: i128 = 500; // 500 tokens minimum for testing
 
 #[contracttype]
 #[derive(Clone)]
@@ -43,6 +43,14 @@ pub struct UtilityContract;
 
 #[contractimpl]
 impl UtilityContract {
+    pub fn get_minimum_balance_to_flow() -> i128 {
+        MINIMUM_BALANCE_TO_FLOW
+    }
+
+    pub fn set_oracle(env: Env, oracle_address: Address) {
+        // This should be called by admin to set the oracle address
+        // For now, we'll just store it in instance storage
+        env.storage().instance().set(&DataKey::Oracle, &oracle_address);
     }
 
     pub fn register_meter(
@@ -121,6 +129,9 @@ impl UtilityContract {
                 meter.balance -= actual_claim;
             }
         }
+        
+        // Check minimum balance after deduction
+        if meter.balance < MINIMUM_BALANCE_TO_FLOW {
             meter.is_active = false;
         }
 
@@ -131,6 +142,70 @@ impl UtilityContract {
             (Symbol::new(&env, "UsageReported"), meter_id),
             (units_consumed, cost)
         );
+    }
+
+    pub fn claim(env: Env, meter_id: u64) {
+        let mut meter: Meter = env.storage().instance().get(&DataKey::Meter(meter_id)).ok_or("Meter not found").unwrap();
+        meter.provider.require_auth();
+
+        let now = env.ledger().timestamp();
+        let elapsed = now.checked_sub(meter.last_update).unwrap_or(0);
+        let amount = (elapsed as i128) * meter.rate_per_unit;
+        
+        // Check if we're in the same hour as last claim
+        let current_hour = now / 3600;
+        let last_claim_hour = meter.last_claim_time / 3600;
+        
+        if current_hour == last_claim_hour {
+            // Same hour, check if we exceed max flow rate
+            let max_allowed = meter.max_flow_rate_per_hour - meter.claimed_this_hour;
+            let actual_amount = if amount > max_allowed {
+                max_allowed
+            } else {
+                amount
+            };
+            
+            // Ensure we don't overdraw the balance
+            let claimable = if actual_amount > meter.balance {
+                meter.balance
+            } else {
+                actual_amount
+            };
+
+            if claimable > 0 {
+                let client = token::Client::new(&env, &meter.token);
+                client.transfer(&env.current_contract_address(), &meter.provider, &claimable);
+                meter.balance -= claimable;
+                meter.claimed_this_hour += claimable;
+            }
+        } else {
+            // New hour, reset claimed_this_hour
+            meter.claimed_this_hour = 0;
+            
+            // Ensure we don't overdraw the balance
+            let claimable = if amount > meter.balance {
+                meter.balance
+            } else {
+                amount
+            };
+
+            if claimable > 0 {
+                let client = token::Client::new(&env, &meter.token);
+                client.transfer(&env.current_contract_address(), &meter.provider, &claimable);
+                meter.balance -= claimable;
+                meter.claimed_this_hour = claimable;
+            }
+        }
+
+        meter.last_update = now;
+        meter.last_claim_time = now;
+        
+        // Deactivate if balance falls below minimum requirement
+        if meter.balance < MINIMUM_BALANCE_TO_FLOW {
+            meter.is_active = false;
+        }
+
+        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
     }
 
     pub fn update_usage(env: Env, meter_id: u64, watt_hours_consumed: i128) {
@@ -176,13 +251,15 @@ impl UtilityContract {
 
     pub fn get_watt_hours_display(precise_watt_hours: i128, precision_factor: i128) -> i128 {
         precise_watt_hours / precision_factor
+    }
+
     pub fn calculate_expected_depletion(env: Env, meter_id: u64) -> Option<u64> {
         if let Some(meter) = env.storage().instance().get::<_, Meter>(&DataKey::Meter(meter_id)) {
-            if meter.balance <= 0 || meter.rate_per_second <= 0 {
+            if meter.balance <= 0 || meter.rate_per_unit <= 0 {
                 return Some(0); // Already depleted or no consumption
             }
             
-            let seconds_until_depletion = meter.balance / meter.rate_per_second;
+            let seconds_until_depletion = meter.balance / meter.rate_per_unit;
             let current_time = env.ledger().timestamp();
             Some(current_time + seconds_until_depletion as u64)
         } else {
@@ -194,8 +271,17 @@ impl UtilityContract {
         let mut meter: Meter = env.storage().instance().get(&DataKey::Meter(meter_id)).ok_or("Meter not found").unwrap();
         meter.provider.require_auth();
         
-        // Immediately disable the meter
+        // Emergency shutdown always disables the meter regardless of balance
         meter.is_active = false;
+        
+        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+    }
+
+    pub fn set_max_flow_rate(env: Env, meter_id: u64, max_rate_per_hour: i128) {
+        let mut meter: Meter = env.storage().instance().get(&DataKey::Meter(meter_id)).ok_or("Meter not found").unwrap();
+        meter.provider.require_auth();
+        
+        meter.max_flow_rate_per_hour = max_rate_per_hour;
         
         env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
     }

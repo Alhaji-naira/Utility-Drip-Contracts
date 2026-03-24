@@ -26,7 +26,7 @@ fn test_utility_flow() {
     let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
 
     // Initial funding - provide enough for minimum balance tests
-    token_admin_client.mint(&user, &10000000); // 10 XLM
+    token_admin_client.mint(&user, &1000); // 1000 tokens
 
     // 1. Register Meter
     let rate = 10; // 10 tokens per unit (kWh)
@@ -44,12 +44,12 @@ fn test_utility_flow() {
     assert_eq!(meter.max_flow_rate_per_hour, 36000); // 10 * 3600
 
     // 2. Top up with minimum balance
-    client.top_up(&meter_id, &5000000); // 5 XLM - meets minimum
+    client.top_up(&meter_id, &500); // 500 tokens - meets minimum
     let meter = client.get_meter(&meter_id).unwrap();
-    assert_eq!(meter.balance, 5000000);
+    assert_eq!(meter.balance, 500);
     assert_eq!(meter.is_active, true);
-    assert_eq!(token.balance(&user), 5000000); // 10,000,000 - 5,000,000 = 5,000,000 remaining
-    assert_eq!(token.balance(&contract_id), 5000000);
+    assert_eq!(token.balance(&user), 500); // 1000 - 500 = 500 remaining
+    assert_eq!(token.balance(&contract_id), 500);
 
     // 3. Report usage (billing by units)
     let units_consumed = 15; // 15 kWh
@@ -58,10 +58,10 @@ fn test_utility_flow() {
     let meter = client.get_meter(&meter_id).unwrap();
 
     let meter = client.get_meter(&meter_id).unwrap();
-    assert_eq!(meter.balance, 0); // 4,999,900 - 4,999,900 = 0
-    assert_eq!(meter.is_active, false); // Below minimum
-    assert_eq!(token.balance(&provider), 5000000); // 100 + 4,999,900 = 5,000,000 total
-    assert_eq!(token.balance(&contract_id), 0);
+    assert_eq!(meter.balance, 350); // 500 - 150 = 350
+    assert_eq!(meter.is_active, false); // Below minimum (350 < 500)
+    assert_eq!(token.balance(&provider), 150); // 150 tokens claimed
+    assert_eq!(token.balance(&contract_id), 350);
 
     // 5. Test usage tracking
     client.update_usage(&meter_id, &1500); // 1.5 kWh
@@ -90,26 +90,26 @@ fn test_utility_flow() {
 
     // 9. Test minimum balance functionality
     let min_balance = client.get_minimum_balance_to_flow();
-    assert_eq!(min_balance, 5000000); // 5 XLM in stroops
+    assert_eq!(min_balance, 500); // 500 tokens minimum
 
     // Test small top-up that doesn't meet minimum
     let meter_id_2 = client.register_meter(&user, &provider, &rate, &token_address);
-    client.top_up(&meter_id_2, &1000000); // 1 XLM - below minimum
+    client.top_up(&meter_id_2, &100); // 100 tokens - below minimum
     let meter_2 = client.get_meter(&meter_id_2).unwrap();
-    assert_eq!(meter_2.balance, 1000000);
+    assert_eq!(meter_2.balance, 100);
     assert_eq!(meter_2.is_active, false); // Should not be active
 
     // Test top-up that meets minimum
-    client.top_up(&meter_id_2, &4000000); // Add 4 XLM more = 5 XLM total
+    client.top_up(&meter_id_2, &400); // Add 400 tokens more = 500 total
     let meter_2 = client.get_meter(&meter_id_2).unwrap();
-    assert_eq!(meter_2.balance, 5000000);
+    assert_eq!(meter_2.balance, 500);
     assert_eq!(meter_2.is_active, true); // Should now be active
 
     // Test claim that drops below minimum
     env.ledger().set_timestamp(env.ledger().timestamp() + 100); // 100 seconds pass
     client.claim(&meter_id_2); // This should claim 1000 tokens (100 * 10)
     let meter_2 = client.get_meter(&meter_id_2).unwrap();
-    assert_eq!(meter_2.balance, 4999000); // 5M - 1M = 4.999M (not 4M)
+    assert_eq!(meter_2.balance, 400); // 500 - 100 = 400
     assert_eq!(meter_2.is_active, false); // Should be deactivated
 }
 
