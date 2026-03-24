@@ -327,3 +327,45 @@ fn test_unsupported_token_payment() {
     // Should panic because bad_token_address is not supported
     client.top_up_with_token(&meter_id, &1000, &bad_token_address);
 }
+
+#[test]
+fn test_admin_fee_collection() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(UtilityContract, ());
+    let client = UtilityContractClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let maintenance_wallet = Address::generate(&env);
+    
+    let oracle = Address::generate(&env);
+    client.set_oracle(&oracle);
+
+    let token_admin = Address::generate(&env);
+    let token_address = env.register_stellar_asset_contract(token_admin.clone());
+    let token = token::Client::new(&env, &token_address);
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
+
+    token_admin_client.mint(&user, &2000);
+
+    // Configure fee: 50 bps = 0.5%
+    client.set_maintenance_config(&maintenance_wallet, &50);
+
+    let rate = 10;
+    let meter_id = client.register_meter(&user, &provider, &rate, &token_address);
+    client.top_up(&meter_id, &1000);
+
+    client.deduct_units(&meter_id, &20); // Cost: 200
+
+    assert_eq!(token.balance(&maintenance_wallet), 1); // 200 * 0.005 = 1
+    assert_eq!(token.balance(&provider), 199);
+    
+    env.ledger().set_timestamp(env.ledger().timestamp() + 40); 
+    client.claim(&meter_id); // Cost: 400
+    
+    assert_eq!(token.balance(&maintenance_wallet), 3); // 1 + (400 * 0.005) = 3
+    assert_eq!(token.balance(&provider), 597); // 199 + 398 = 597
+    assert_eq!(token.balance(&contract_id), 400); // 1000 - 200 - 400 = 400 remaining
+}

@@ -37,6 +37,8 @@ pub enum DataKey {
     Count,
     Oracle,
     SupportedToken(Address), // For Carbon Credits / alternative tokens
+    MaintenanceWallet,
+    ProtocolFeeBps, // Protocol fee in basis points (e.g., 50 = 0.5%)
 }
 
 #[contract]
@@ -52,6 +54,11 @@ impl UtilityContract {
         // This should be called by admin to set the oracle address
         // For now, we'll just store it in instance storage
         env.storage().instance().set(&DataKey::Oracle, &oracle_address);
+    }
+
+    pub fn set_maintenance_config(env: Env, wallet: Address, fee_bps: i128) {
+        env.storage().instance().set(&DataKey::MaintenanceWallet, &wallet);
+        env.storage().instance().set(&DataKey::ProtocolFeeBps, &fee_bps);
     }
 
     pub fn add_supported_token(env: Env, token: Address) {
@@ -159,7 +166,19 @@ impl UtilityContract {
 
             if actual_claim > 0 {
                 let client = token::Client::new(&env, &meter.token);
-                client.transfer(&env.current_contract_address(), &meter.provider, &actual_claim);
+                let mut payout = actual_claim;
+                
+                if let Some(wallet) = env.storage().instance().get::<_, Address>(&DataKey::MaintenanceWallet) {
+                    let fee_bps: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+                    let fee = (actual_claim * fee_bps) / 10000;
+                    payout -= fee;
+                    if fee > 0 {
+                        client.transfer(&env.current_contract_address(), &wallet, &fee);
+                    }
+                }
+                if payout > 0 {
+                    client.transfer(&env.current_contract_address(), &meter.provider, &payout);
+                }
                 meter.balance -= actual_claim;
             }
         }
@@ -208,7 +227,19 @@ impl UtilityContract {
 
             if claimable > 0 {
                 let client = token::Client::new(&env, &meter.token);
-                client.transfer(&env.current_contract_address(), &meter.provider, &claimable);
+                let mut payout = claimable;
+                
+                if let Some(wallet) = env.storage().instance().get::<_, Address>(&DataKey::MaintenanceWallet) {
+                    let fee_bps: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+                    let fee = (claimable * fee_bps) / 10000;
+                    payout -= fee;
+                    if fee > 0 {
+                        client.transfer(&env.current_contract_address(), &wallet, &fee);
+                    }
+                }
+                if payout > 0 {
+                    client.transfer(&env.current_contract_address(), &meter.provider, &payout);
+                }
                 meter.balance -= claimable;
                 meter.claimed_this_hour += claimable;
             }
@@ -225,7 +256,19 @@ impl UtilityContract {
 
             if claimable > 0 {
                 let client = token::Client::new(&env, &meter.token);
-                client.transfer(&env.current_contract_address(), &meter.provider, &claimable);
+                let mut payout = claimable;
+                
+                if let Some(wallet) = env.storage().instance().get::<_, Address>(&DataKey::MaintenanceWallet) {
+                    let fee_bps: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+                    let fee = (claimable * fee_bps) / 10000;
+                    payout -= fee;
+                    if fee > 0 {
+                        client.transfer(&env.current_contract_address(), &wallet, &fee);
+                    }
+                }
+                if payout > 0 {
+                    client.transfer(&env.current_contract_address(), &meter.provider, &payout);
+                }
                 meter.balance -= claimable;
                 meter.claimed_this_hour = claimable;
             }
