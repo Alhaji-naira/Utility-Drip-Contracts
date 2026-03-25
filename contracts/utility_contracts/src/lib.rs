@@ -367,6 +367,11 @@ impl UtilityContract {
         env.storage().instance().set(&DataKey::Oracle, &oracle_address);
     }
 
+    pub fn set_maintenance_config(env: Env, wallet: Address, fee_bps: i128) {
+        env.storage().instance().set(&DataKey::MaintenanceWallet, &wallet);
+        env.storage().instance().set(&DataKey::ProtocolFeeBps, &fee_bps);
+    }
+
     pub fn add_supported_token(env: Env, token: Address) {
         // Ideally requires admin auth, but for simplicity:
         env.storage().instance().set(&DataKey::SupportedToken(token), &true);
@@ -543,6 +548,21 @@ impl UtilityContract {
 
             if actual_claim > 0 {
                 let client = token::Client::new(&env, &meter.token);
+                let mut payout = actual_claim;
+                
+                if let Some(wallet) = env.storage().instance().get::<_, Address>(&DataKey::MaintenanceWallet) {
+                    let fee_bps: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+                    let fee = (actual_claim * fee_bps) / 10000;
+                    payout -= fee;
+                    if fee > 0 {
+                        client.transfer(&env.current_contract_address(), &wallet, &fee);
+                    }
+                }
+                if payout > 0 {
+                    client.transfer(&env.current_contract_address(), &meter.provider, &payout);
+                }
+                meter.balance -= actual_claim;
+            }
                 client.transfer(&env.current_contract_address(), &meter.provider, &actual_claim);
                 meter.balance -= actual_claim;
             }
@@ -552,6 +572,13 @@ impl UtilityContract {
         if meter.balance < MINIMUM_BALANCE_TO_FLOW {
             meter.is_active = false;
         }
+        
+        // Check minimum balance after deduction
+        if meter.balance < MINIMUM_BALANCE_TO_FLOW {
+            meter.is_active = false;
+        }
+
+        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
 
         env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
 
@@ -592,6 +619,19 @@ impl UtilityContract {
 
             if claimable > 0 {
                 let client = token::Client::new(&env, &meter.token);
+                let mut payout = claimable;
+                
+                if let Some(wallet) = env.storage().instance().get::<_, Address>(&DataKey::MaintenanceWallet) {
+                    let fee_bps: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+                    let fee = (claimable * fee_bps) / 10000;
+                    payout -= fee;
+                    if fee > 0 {
+                        client.transfer(&env.current_contract_address(), &wallet, &fee);
+                    }
+                }
+                if payout > 0 {
+                    client.transfer(&env.current_contract_address(), &meter.provider, &payout);
+                }
                 client.transfer(&env.current_contract_address(), &meter.provider, &claimable);
                 meter.balance -= claimable;
                 meter.claimed_this_hour += claimable;
@@ -609,6 +649,19 @@ impl UtilityContract {
 
             if claimable > 0 {
                 let client = token::Client::new(&env, &meter.token);
+                let mut payout = claimable;
+                
+                if let Some(wallet) = env.storage().instance().get::<_, Address>(&DataKey::MaintenanceWallet) {
+                    let fee_bps: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+                    let fee = (claimable * fee_bps) / 10000;
+                    payout -= fee;
+                    if fee > 0 {
+                        client.transfer(&env.current_contract_address(), &wallet, &fee);
+                    }
+                }
+                if payout > 0 {
+                    client.transfer(&env.current_contract_address(), &meter.provider, &payout);
+                }
                 client.transfer(&env.current_contract_address(), &meter.provider, &claimable);
                 meter.balance -= claimable;
                 meter.claimed_this_hour = claimable;
@@ -725,6 +778,17 @@ impl UtilityContract {
         meter.provider.require_auth();
         
         // Emergency shutdown always disables the meter regardless of balance
+        meter.is_active = false;
+        
+        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+    }
+
+    pub fn set_max_flow_rate(env: Env, meter_id: u64, max_rate_per_hour: i128) {
+        let mut meter: Meter = env.storage().instance().get(&DataKey::Meter(meter_id)).ok_or("Meter not found").unwrap();
+        meter.provider.require_auth();
+        
+        meter.max_flow_rate_per_hour = max_rate_per_hour;
+        
         meter.is_active = false;
         
         env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
