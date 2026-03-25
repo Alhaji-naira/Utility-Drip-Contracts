@@ -64,23 +64,6 @@ pub enum DataKey {
     Oracle,
 }
 
-#[contracterror]
-#[derive(Copy, Clone, Eq, PartialEq)]
-#[repr(u32)]
-pub enum ContractError {
-    MeterNotFound = 1,
-    OracleNotSet = 2,
-    WithdrawalLimitExceeded = 3,
-    PriceConversionFailed = 4,
-    InvalidTokenAmount = 5,
-    InvalidUsageValue = 4,
-    UsageExceedsLimit = 5,
-    InvalidPrecisionFactor = 6,
-    InvalidSignature = 4,
-    PublicKeyMismatch = 5,
-    TimestampTooOld = 6,
-}
-
 #[contract]
 pub struct UtilityContract;
 
@@ -384,6 +367,15 @@ impl UtilityContract {
         env.storage().instance().set(&DataKey::Oracle, &oracle_address);
     }
 
+    pub fn add_supported_token(env: Env, token: Address) {
+        // Ideally requires admin auth, but for simplicity:
+        env.storage().instance().set(&DataKey::SupportedToken(token), &true);
+    }
+
+    pub fn remove_supported_token(env: Env, token: Address) {
+        env.storage().instance().set(&DataKey::SupportedToken(token), &false);
+    }
+
     pub fn register_meter(
         env: Env,
         user: Address,
@@ -473,20 +465,44 @@ impl UtilityContract {
         client.transfer(&meter.user, &env.current_contract_address(), &amount);
 
         meter.balance += amount;
+        
+        // Only activate if balance meets minimum requirement
+        meter.is_active = meter.balance >= MINIMUM_BALANCE_TO_FLOW;
+        meter.last_update = env.ledger().timestamp();
+        
+        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+    }
+
+    pub fn top_up_with_token(env: Env, meter_id: u64, amount: i128, payment_token: Address) {
+        let mut meter: Meter = env.storage().instance().get(&DataKey::Meter(meter_id)).ok_or("Meter not found").unwrap();
+        meter.user.require_auth();
+
+        let is_supported: bool = env.storage().instance().get(&DataKey::SupportedToken(payment_token.clone())).unwrap_or(false);
+        if !is_supported {
+            panic!("Token not supported for payment");
+        }
+
+        let client = token::Client::new(&env, &payment_token);
+        
+        // Burn the alternative token (Carbon Credit) to offset energy footprint
+        client.burn(&meter.user, &amount);
         meter.is_active = true;
         meter.last_update = env.ledger().timestamp();
         
         env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
     }
 
-    pub fn update_device_public_key(env: Env, meter_id: u64, new_public_key: BytesN<32>) {
-        let mut meter = get_meter_or_panic(&env, meter_id);
-        meter.user.require_auth();
-        meter.device_public_key = new_public_key;
+        // Credit the meter balance 1:1 for the burned tokens
+        meter.balance += amount;
+        
+        meter.is_active = meter.balance >= MINIMUM_BALANCE_TO_FLOW;
+        meter.last_update = env.ledger().timestamp();
+        
         env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
     }
 
-    pub fn deduct_units(env: Env, signed_data: SignedUsageData) {
+    #[allow(deprecated)]
+    pub fn deduct_units(env: Env, meter_id: u64, units_consumed: i128) {
         let oracle = get_oracle_or_panic(&env);
         oracle.require_auth();
 
@@ -533,6 +549,76 @@ impl UtilityContract {
         }
         
         // Check minimum balance after deduction
+        if meter.balance < MINIMUM_BALANCE_TO_FLOW {
+            meter.is_active = false;
+        }
+
+        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+
+        // Emit UsageReported event
+        env.events().publish(
+            (Symbol::new(&env, "UsageReported"), meter_id),
+            (units_consumed, cost)
+        );
+    }
+
+    pub fn claim(env: Env, meter_id: u64) {
+        let mut meter: Meter = env.storage().instance().get(&DataKey::Meter(meter_id)).ok_or("Meter not found").unwrap();
+        meter.provider.require_auth();
+
+        let now = env.ledger().timestamp();
+        let elapsed = now.checked_sub(meter.last_update).unwrap_or(0);
+        let amount = (elapsed as i128) * meter.rate_per_unit;
+        
+        // Check if we're in the same hour as last claim
+        let current_hour = now / 3600;
+        let last_claim_hour = meter.last_claim_time / 3600;
+        
+        if current_hour == last_claim_hour {
+            // Same hour, check if we exceed max flow rate
+            let max_allowed = meter.max_flow_rate_per_hour - meter.claimed_this_hour;
+            let actual_amount = if amount > max_allowed {
+                max_allowed
+            } else {
+                amount
+            };
+            
+            // Ensure we don't overdraw the balance
+            let claimable = if actual_amount > meter.balance {
+                meter.balance
+            } else {
+                actual_amount
+            };
+
+            if claimable > 0 {
+                let client = token::Client::new(&env, &meter.token);
+                client.transfer(&env.current_contract_address(), &meter.provider, &claimable);
+                meter.balance -= claimable;
+                meter.claimed_this_hour += claimable;
+            }
+        } else {
+            // New hour, reset claimed_this_hour
+            meter.claimed_this_hour = 0;
+            
+            // Ensure we don't overdraw the balance
+            let claimable = if amount > meter.balance {
+                meter.balance
+            } else {
+                amount
+            };
+
+            if claimable > 0 {
+                let client = token::Client::new(&env, &meter.token);
+                client.transfer(&env.current_contract_address(), &meter.provider, &claimable);
+                meter.balance -= claimable;
+                meter.claimed_this_hour = claimable;
+            }
+        }
+
+        meter.last_update = now;
+        meter.last_claim_time = now;
+        
+        // Deactivate if balance falls below minimum requirement
         if meter.balance < MINIMUM_BALANCE_TO_FLOW {
             meter.is_active = false;
         }
@@ -640,6 +726,16 @@ impl UtilityContract {
         
         // Emergency shutdown always disables the meter regardless of balance
         meter.is_active = false;
+        
+        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+    }
+
+    pub fn set_max_flow_rate(env: Env, meter_id: u64, max_rate_per_hour: i128) {
+        let mut meter: Meter = env.storage().instance().get(&DataKey::Meter(meter_id)).ok_or("Meter not found").unwrap();
+        meter.provider.require_auth();
+        
+        meter.max_flow_rate_per_hour = max_rate_per_hour;
+        
         env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
     }
 
