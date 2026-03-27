@@ -25,6 +25,8 @@ pub struct PriceData {
     pub last_updated: u64,
 }
 #[cfg(test)]
+mod debt_fuzz_tests;
+#[cfg(test)]
 mod fuzz_tests;
 
 #[contracttype]
