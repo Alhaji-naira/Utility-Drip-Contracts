@@ -96,7 +96,11 @@ pub struct Meter {
     pub heartbeat: u64,
     pub device_public_key: BytesN<32>,
     pub is_paired: bool,
-
+    pub grace_period_start: u64, // timestamp when balance hit 0 and grace period started
+    pub is_paused: bool,
+    pub tier_threshold: i128,
+    pub tier_rate: i128,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -136,7 +140,9 @@ pub enum DataKey {
     SupportedToken(Address),
     SupportedWithdrawalToken(Address),
     ProviderTotalPool(Address),
-    ClosingFeeBps,
+    Referral(Address),
+    PollVotes(Symbol),
+    UserVoted(Address, Symbol),
 }
 
 #[contracterror]
@@ -158,9 +164,8 @@ pub enum ContractError {
     ChallengeNotFound = 13,
     InvalidPairingSignature = 14,
     MeterNotPaired = 15,
-    InsufficientBalance = 16,
-    AccountAlreadyClosed = 17,
-    InvalidClosingFee = 18,
+    MeterPaused = 16,
+    AlreadyVoted = 17,
 }
 
 #[contracttype]
@@ -188,7 +193,7 @@ const PEAK_HOUR_START: u64 = 18 * HOUR_IN_SECONDS; // 64800 seconds
 const PEAK_HOUR_END: u64 = 21 * HOUR_IN_SECONDS; // 75600 seconds
 const PEAK_RATE_MULTIPLIER: i128 = 3; // 1.5x => stored as 3 (divide by 2)
 const RATE_PRECISION: i128 = 2; // Precision for rate calculations
-const DEFAULT_GREEN_ENERGY_DISCOUNT_BPS: i128 = 500; // 5% discount for renewable energy (500 basis points)
+const REFERRAL_REWARD_UNITS: i128 = 500; // 5 units reward for referrals
 
 // XLM precision constants - XLM has 7 decimal places (0.0000001 minimum)
 const XLM_PRECISION: i128 = 10_000_000; // 10^7 for 7 decimal places
@@ -354,17 +359,17 @@ fn is_peak_hour(timestamp: u64) -> bool {
     seconds_in_day >= PEAK_HOUR_START && seconds_in_day < PEAK_HOUR_END
 }
 
-fn get_effective_rate(meter: &Meter, timestamp: u64, is_renewable_energy: bool) -> i128 {
-    let base_rate = if is_peak_hour(timestamp) {
-        meter.peak_rate
+fn get_effective_rate(meter: &Meter, timestamp: u64) -> i128 {
+    let base_rate = if meter.tier_threshold > 0
+        && meter.usage_data.current_cycle_watt_hours > meter.tier_threshold
+    {
+        meter.tier_rate
     } else {
         meter.off_peak_rate
     };
-    
-    // Apply green energy discount if applicable
-    if is_renewable_energy {
-        let discount_amount = base_rate.saturating_mul(meter.green_energy_discount_bps) / 10000;
-        base_rate.saturating_sub(discount_amount)
+
+    if is_peak_hour(timestamp) {
+        base_rate.saturating_mul(PEAK_RATE_MULTIPLIER) / RATE_PRECISION
     } else {
         base_rate
     }
@@ -378,6 +383,11 @@ fn provider_meter_value(meter: &Meter) -> i128 {
 }
 
 fn refresh_activity(meter: &mut Meter, now: u64) {
+    if meter.is_paused {
+        meter.is_active = false;
+        return;
+    }
+
     match meter.billing_type {
         BillingType::PrePaid => {
             // Check if meter is in grace period
@@ -595,6 +605,44 @@ impl UtilityContract {
         )
     }
 
+    pub fn register_with_referral(
+        env: Env,
+        user: Address,
+        provider: Address,
+        off_peak_rate: i128,
+        token: Address,
+        device_public_key: BytesN<32>,
+        referrer: Address,
+    ) -> u64 {
+        let meter_id = Self::register_meter(
+            env.clone(),
+            user.clone(),
+            provider,
+            off_peak_rate,
+            token,
+            device_public_key,
+        );
+
+        if referrer != user {
+            let mut meter = get_meter_or_panic(&env, meter_id);
+            // Reward the new user
+            meter.balance = meter.balance.saturating_add(REFERRAL_REWARD_UNITS);
+            env.storage()
+                .instance()
+                .set(&DataKey::Meter(meter_id), &meter);
+
+            // Reward the referrer if they have a meter? (simplified for now: just record it)
+            env.storage()
+                .instance()
+                .set(&DataKey::Referral(user), &referrer);
+
+            env.events()
+                .publish((symbol_short!("Referral"), meter_id), (referrer, user));
+        }
+
+        meter_id
+    }
+
     pub fn register_meter_with_mode(
         env: Env,
         user: Address,
@@ -640,7 +688,7 @@ impl UtilityContract {
             collateral_limit: 0,
             last_update: now,
             is_active: false,
-            token,
+            token: token.clone(),
             usage_data,
             max_flow_rate_per_hour: off_peak_rate.saturating_mul(HOUR_IN_SECONDS as i128),
             last_claim_time: now,
@@ -648,7 +696,10 @@ impl UtilityContract {
             heartbeat: now,
             device_public_key,
             is_paired: false,
-
+            grace_period_start: 0,
+            is_paused: false,
+            tier_threshold: 100_000, // 100 kWh default threshold
+            tier_rate: off_peak_rate.saturating_mul(120) / 100, // 20% higher rate for top tier by default
         };
 
         env.storage().instance().set(&DataKey::Meter(count), &meter);
@@ -725,6 +776,10 @@ impl UtilityContract {
                 heartbeat: now,
                 device_public_key: meter_info.device_public_key,
                 is_paired: false,
+                grace_period_start: 0,
+                is_paused: false,
+                tier_threshold: 100_000,
+                tier_rate: meter_info.off_peak_rate.saturating_mul(120) / 100,
             };
 
             env.storage().instance().set(&DataKey::Meter(count), &meter);
@@ -1195,6 +1250,72 @@ impl UtilityContract {
         } else {
             None
         }
+    }
+
+    pub fn set_meter_pause(env: Env, meter_id: u64, paused: bool) {
+        let mut meter = get_meter_or_panic(&env, meter_id);
+        meter.user.require_auth();
+
+        meter.is_paused = paused;
+        let now = env.ledger().timestamp();
+        refresh_activity(&mut meter, now);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Meter(meter_id), &meter);
+
+        env.events()
+            .publish((symbol_short!("Paused"), meter_id), paused);
+    }
+
+    pub fn set_tiered_pricing(env: Env, meter_id: u64, threshold: i128, rate: i128) {
+        let mut meter = get_meter_or_panic(&env, meter_id);
+        meter.provider.require_auth();
+
+        meter.tier_threshold = threshold;
+        meter.tier_rate = rate;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Meter(meter_id), &meter);
+    }
+
+    pub fn vote_for_asset(env: Env, voter: Address, asset_symbol: Symbol) {
+        voter.require_auth();
+
+        // Check if user already voted for this specific asset
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::UserVoted(voter.clone(), asset_symbol.clone()))
+        {
+            panic_with_error!(env, ContractError::AlreadyVoted);
+        }
+
+        let mut votes = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::PollVotes(asset_symbol.clone()))
+            .unwrap_or(0);
+
+        votes += 1;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PollVotes(asset_symbol.clone()), &votes);
+        env.storage()
+            .instance()
+            .set(&DataKey::UserVoted(voter, asset_symbol.clone()), &true);
+
+        env.events()
+            .publish((symbol_short!("Voted"), asset_symbol), votes);
+    }
+
+    pub fn get_votes(env: Env, asset_symbol: Symbol) -> i128 {
+        env.storage()
+            .instance()
+            .get::<_, i128>(&DataKey::PollVotes(asset_symbol))
+            .unwrap_or(0)
     }
 
     pub fn emergency_shutdown(env: Env, meter_id: u64) {
