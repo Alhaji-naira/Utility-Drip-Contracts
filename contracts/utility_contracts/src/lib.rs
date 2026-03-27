@@ -91,6 +91,7 @@ pub struct Meter {
     pub heartbeat: u64,
     pub device_public_key: BytesN<32>,
     pub is_paired: bool,
+    pub grace_period_start: u64, // timestamp when balance hit 0 and grace period started
 }
 
 #[contracttype]
@@ -166,6 +167,8 @@ pub struct UtilityContract;
 
 const HOUR_IN_SECONDS: u64 = 60 * 60;
 const DAY_IN_SECONDS: u64 = 24 * HOUR_IN_SECONDS;
+const GRACE_PERIOD_SECONDS: u64 = 86_400; // 24 hours grace period
+const DEBT_THRESHOLD: i128 = -10_000_000; // -10 XLM (in stroops) threshold for negative balance
 const DAILY_WITHDRAWAL_PERCENT: i128 = 10;
 const MAX_USAGE_PER_UPDATE: i128 = 1_000_000_000_000i128; // 1 billion kWh max per update
 const MIN_PRECISION_FACTOR: i128 = 1;
@@ -334,8 +337,33 @@ fn provider_meter_value(meter: &Meter) -> i128 {
     }
 }
 
-fn refresh_activity(meter: &mut Meter) {
-    meter.is_active = provider_meter_value(meter) > 0;
+fn refresh_activity(meter: &mut Meter, now: u64) {
+    match meter.billing_type {
+        BillingType::PrePaid => {
+            // Check if meter is in grace period
+            if meter.balance <= 0 && meter.grace_period_start == 0 {
+                // Balance just hit 0, start grace period
+                meter.grace_period_start = now;
+                meter.is_active = true; // Keep active during grace period
+            } else if meter.balance < 0 && meter.grace_period_start > 0 {
+                // Check if grace period has expired
+                if now.saturating_sub(meter.grace_period_start) >= GRACE_PERIOD_SECONDS {
+                    meter.is_active = false;
+                } else {
+                    meter.is_active = true; // Still in grace period
+                }
+            } else if meter.balance > 0 {
+                // Reset grace period when balance is positive again
+                meter.grace_period_start = 0;
+                meter.is_active = meter.balance >= MINIMUM_BALANCE_TO_FLOW;
+            } else {
+                meter.is_active = meter.balance >= MINIMUM_BALANCE_TO_FLOW;
+            }
+        }
+        BillingType::PostPaid => {
+            meter.is_active = remaining_postpaid_collateral(meter) > 0;
+        }
+    }
 }
 
 fn reset_claim_window_if_needed(meter: &mut Meter, now: u64) {
@@ -554,6 +582,7 @@ impl UtilityContract {
             heartbeat: now,
             device_public_key,
             is_paired: false,
+            grace_period_start: 0,
         };
 
         env.storage().instance().set(&DataKey::Meter(count), &meter);
@@ -693,7 +722,15 @@ impl UtilityContract {
 
         match meter.billing_type {
             BillingType::PrePaid => {
-                meter.balance = meter.balance.saturating_add(converted_amount);
+                // Auto-deduct debt first if in debt mode
+                if meter.balance < 0 {
+                    let debt_settlement = converted_amount.min(meter.balance.abs());
+                    meter.balance = meter.balance.saturating_add(debt_settlement);
+                    let remaining_amount = converted_amount.saturating_sub(debt_settlement);
+                    meter.balance = meter.balance.saturating_add(remaining_amount);
+                } else {
+                    meter.balance = meter.balance.saturating_add(converted_amount);
+                }
             }
             BillingType::PostPaid => {
                 let settlement = converted_amount.min(meter.debt.max(0));
@@ -705,7 +742,7 @@ impl UtilityContract {
         }
 
         let now = env.ledger().timestamp();
-        refresh_activity(&mut meter);
+        refresh_activity(&mut meter, now);
 
         if !was_active && meter.is_active {
             meter.last_update = now;
@@ -798,9 +835,7 @@ impl UtilityContract {
         meter.provider.require_auth();
 
         // Verify the signature and pairing
-        if let Err(e) = verify_usage_signature(&env, &signed_data, &meter) {
-            panic_with_error!(&env, e);
-        }
+        verify_usage_signature(&env, &signed_data, &meter)?;
 
         // Store old meter value for pool update
         let old_meter_value = provider_meter_value(&meter);
@@ -839,10 +874,8 @@ impl UtilityContract {
             meter.usage_data.peak_usage_watt_hours = meter.usage_data.current_cycle_watt_hours;
         }
 
-        // Check minimum balance after deduction
-        if meter.balance < MINIMUM_BALANCE_TO_FLOW {
-            meter.is_active = false;
-        }
+        // Update activity status with grace period logic
+        refresh_activity(&mut meter, now);
 
         meter.last_update = now;
 
@@ -890,9 +923,13 @@ impl UtilityContract {
                 amount
             };
 
-            // Ensure we don't overdraw the balance
-            let claimable = if actual_amount > meter.balance {
-                meter.balance
+            // Ensure we don't exceed debt threshold
+            let claimable = if actual_amount > meter.balance
+                && meter.balance - actual_amount >= DEBT_THRESHOLD
+            {
+                actual_amount
+            } else if actual_amount > meter.balance {
+                meter.balance - DEBT_THRESHOLD // Allow going down to threshold
             } else {
                 actual_amount
             };
@@ -927,9 +964,11 @@ impl UtilityContract {
             // New hour, reset claimed_this_hour
             meter.claimed_this_hour = 0;
 
-            // Ensure we don't overdraw the balance
-            let claimable = if amount > meter.balance {
-                meter.balance
+            // Ensure we don't exceed debt threshold
+            let claimable = if amount > meter.balance && meter.balance - amount >= DEBT_THRESHOLD {
+                amount
+            } else if amount > meter.balance {
+                meter.balance - DEBT_THRESHOLD // Allow going down to threshold
             } else {
                 amount
             };
@@ -965,10 +1004,8 @@ impl UtilityContract {
         meter.last_update = now;
         meter.last_claim_time = now;
 
-        // Deactivate if balance falls below minimum requirement
-        if meter.balance < MINIMUM_BALANCE_TO_FLOW {
-            meter.is_active = false;
-        }
+        // Update activity status with grace period logic
+        refresh_activity(&mut meter, now);
 
         // Update provider total pool
         let new_meter_value = provider_meter_value(&meter);
@@ -1161,7 +1198,7 @@ impl UtilityContract {
 
         let now = env.ledger().timestamp();
         let was_active = meter.is_active;
-        refresh_activity(&mut meter);
+        refresh_activity(&mut meter, now);
 
         if !was_active && meter.is_active {
             meter.last_update = now;
