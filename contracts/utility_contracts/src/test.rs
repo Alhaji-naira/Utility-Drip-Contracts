@@ -1683,3 +1683,113 @@ fn test_refund_estimate_for_nonexistent_meter() {
     assert_eq!(estimate, None);
 }
 
+#[test]
+fn test_path_payment_usdc_to_xlm() {
+    let env = Env::default();
+    let contract_address = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_address);
+    
+    // Setup mock oracle
+    let oracle_address = env.register_contract(None, MockPriceOracleContract);
+    let oracle_client = MockPriceOracleContractClient::new(&env, &oracle_address);
+    oracle_client.init(&100, 7); // 1 XLM = 100 USD cents = $1.00
+    
+    client.set_oracle(&oracle_address);
+    
+    // Setup addresses
+    let user = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let usdc_admin = Address::generate(&env);
+    let usdc_address = env.register_stellar_asset_contract(usdc_admin.clone());
+    let usdc_client = token::StellarAssetClient::new(&env, &usdc_address);
+    
+    // Setup USDC token
+    usdc_client.mint(&user, &10000);
+    
+    let device_public_key = BytesN::from_array(&env, &[0; 32]);
+    let meter_id = client.register_meter(&user, &provider, &100, &usdc_address);
+    
+    // Top up with USDC
+    let usdc_token = token::Client::new(&env, &usdc_address);
+    usdc_token.approve(&user, &contract_address, &5000);
+    client.top_up(&meter_id, &5000);
+    
+    // Fund contract with XLM for path payment
+    let xlm_token = token::Client::new(&env, &contract_address);
+    // In real scenario, contract would need to be funded with XLM
+    
+    // Test path payment withdrawal
+    client.withdraw_earnings_path_payment(&meter_id, &1000, &contract_address);
+    
+    // Check that meter balance was reduced
+    let meter = client.get_meter(&meter_id);
+    assert_eq!(meter.unwrap().balance, 4000);
+}
+
+#[test]
+fn test_path_payment_same_token() {
+    let env = Env::default();
+    let contract_address = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_address);
+    
+    // Setup addresses
+    let user = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_address = env.register_stellar_asset_contract(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address);
+    
+    // Setup token
+    token_client.mint(&user, &10000);
+    
+    let device_public_key = BytesN::from_array(&env, &[0; 32]);
+    let meter_id = client.register_meter(&user, &provider, &100, &token_address);
+    
+    // Top up
+    let token = token::Client::new(&env, &token_address);
+    token.approve(&user, &contract_address, &5000);
+    client.top_up(&meter_id, &5000);
+    
+    // Test path payment with same token (should use regular withdrawal)
+    client.withdraw_earnings_path_payment(&meter_id, &1000, &token_address);
+    
+    // Check that meter balance was reduced
+    let meter = client.get_meter(&meter_id);
+    assert_eq!(meter.unwrap().balance, 4000);
+}
+
+#[test]
+fn test_supported_withdrawal_tokens() {
+    let env = Env::default();
+    let contract_address = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_address);
+    
+    // Test that native token (XLM) is always supported
+    let supported_tokens = client.get_supported_withdrawal_tokens();
+    assert!(!supported_tokens.is_empty());
+    
+    // Test that native token is supported
+    let is_supported = client.is_withdrawal_token_supported(&contract_address);
+    assert!(is_supported);
+}
+
+#[test]
+fn test_add_remove_withdrawal_tokens() {
+    let env = Env::default();
+    let contract_address = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_address);
+    
+    let token_address = Address::generate(&env);
+    
+    // Initially not supported (except native token)
+    assert!(!client.is_withdrawal_token_supported(&token_address));
+    
+    // Add support
+    client.add_supported_withdrawal_token(&token_address);
+    assert!(client.is_withdrawal_token_supported(&token_address));
+    
+    // Remove support
+    client.remove_supported_withdrawal_token(&token_address);
+    assert!(!client.is_withdrawal_token_supported(&token_address));
+}
+
