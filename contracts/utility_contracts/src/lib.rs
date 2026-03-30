@@ -215,6 +215,14 @@ pub struct BatchWithdrawResult {
     pub total_protocol_fee: i128,
 }
 
+// Task #129: Rebate Distribution Result
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchRebateResult {
+    pub total_meters_processed: u32,
+    pub total_rebate_distributed: i128,
+}
+
 // Task #4: Upgrade Proposal Event
 #[contracttype]
 #[derive(Clone)]
@@ -4467,6 +4475,111 @@ impl UtilityContract {
             total_kilowatts_funded,
             total_liters_streamed: total_value_streamed,
             active_meters,
+        }
+    }
+
+    // ============================================================
+    // ISSUE #129: AUTOMATED UTILITY REBATE DISTRIBUTION LOGIC
+    // ============================================================
+
+    /// Distributes a government or provider subsidy (rebate) back to a batch of active users.
+    /// Calculates a fair proportional share based on each meter's total_watt_hours (contribution volume).
+    pub fn distribute_rebate(
+        env: Env,
+        provider: Address,
+        rebate_token: Address,
+        total_rebate_amount: i128,
+        meter_ids: Vec<u64>,
+    ) -> BatchRebateResult {
+        provider.require_auth();
+
+        if total_rebate_amount <= 0 {
+            panic_with_error!(&env, ContractError::InvalidTokenAmount);
+        }
+        if meter_ids.is_empty() {
+            return BatchRebateResult {
+                total_meters_processed: 0,
+                total_rebate_distributed: 0,
+            };
+        }
+
+        // 1. Calculate the total volume of all eligible meters in this batch
+        let mut total_batch_volume: i128 = 0;
+        let mut eligible_meters: u32 = 0;
+
+        for meter_id in meter_ids.iter() {
+            if let Some(meter) = env.storage().instance().get::<_, Meter>(&DataKey::Meter(meter_id)) {
+                // Ensure meter belongs to the provider, is active, and matches the rebate token
+                if meter.provider == provider && meter.is_active && !meter.is_closed && meter.token == rebate_token {
+                    total_batch_volume = total_batch_volume.saturating_add(meter.usage_data.total_watt_hours);
+                    eligible_meters = eligible_meters.saturating_add(1);
+                }
+            }
+        }
+
+        if total_batch_volume == 0 || eligible_meters == 0 {
+            return BatchRebateResult {
+                total_meters_processed: 0,
+                total_rebate_distributed: 0,
+            };
+        }
+
+        // 2. Transfer the total rebate amount from the provider/government to the smart contract
+        let client = token::Client::new(&env, &rebate_token);
+        client.transfer(&provider, &env.current_contract_address(), &total_rebate_amount);
+
+        // 3. Distribute the rebate proportionally to each meter's balance
+        let mut distributed_total: i128 = 0;
+        let mut meters_processed: u32 = 0;
+        let now = env.ledger().timestamp();
+
+        for meter_id in meter_ids.iter() {
+            if let Some(mut meter) = env.storage().instance().get::<_, Meter>(&DataKey::Meter(meter_id)) {
+                if meter.provider == provider && meter.is_active && !meter.is_closed && meter.token == rebate_token {
+                    let meter_volume = meter.usage_data.total_watt_hours;
+
+                    if meter_volume > 0 {
+                        // Proportional share: (meter_volume * total_rebate) / total_batch_volume
+                        let share = meter_volume.saturating_mul(total_rebate_amount) / total_batch_volume;
+
+                        if share > 0 {
+                            match meter.billing_type {
+                                BillingType::PrePaid => {
+                                    meter.balance = meter.balance.saturating_add(share);
+                                }
+                                BillingType::PostPaid => {
+                                    // Rebate acts as a credit against their debt
+                                    meter.debt = meter.debt.saturating_sub(share);
+                                }
+                            }
+
+                            meter.last_update = now;
+                            refresh_activity(&mut meter, now);
+
+                            env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+                            distributed_total = distributed_total.saturating_add(share);
+                            meters_processed = meters_processed.saturating_add(1);
+
+                            // Emit individual rebate event
+                            env.events().publish(
+                                (symbol_short!("Rebate"), meter_id),
+                                share
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit batch rebate summary event
+        env.events().publish(
+            (symbol_short!("BatchReb"), provider),
+            (rebate_token, total_rebate_amount, distributed_total, meters_processed)
+        );
+
+        BatchRebateResult {
+            total_meters_processed: meters_processed,
+            total_rebate_distributed: distributed_total,
         }
     }
 }
