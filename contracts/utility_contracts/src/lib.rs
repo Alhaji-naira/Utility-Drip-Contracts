@@ -19,6 +19,8 @@ pub trait PriceOracle {
 pub trait SoroSusu {
     fn get_susu_score(env: Env, user: Address) -> u32;
     fn is_trusted_saver(env: Env, user: Address) -> bool;
+    fn is_in_default(env: Env, user: Address) -> bool;
+    fn record_debt_payment(env: Env, user: Address, amount: i128);
 }
 
 #[contractclient(name = "VestingVaultClient")]
@@ -181,7 +183,7 @@ pub struct LowBalanceAlert {
     pub meter_id: u64,
     pub user: Address,
     pub remaining_balance: i128,
-    pub hours_remaining: f32,
+    pub hours_remaining_x100: i128, // hours * 100 for 2 decimal places (e.g. 2350 = 23.50 hours)
     pub timestamp: u64,
 }
 
@@ -276,6 +278,17 @@ pub enum VerificationMethod {
     CommunityVoted,
 }
 
+/// Inter-Protocol Debt Service: records a diversion from the maintenance fund
+/// to settle a SoroSusu default on behalf of the meter's user.
+#[contracttype]
+#[derive(Clone)]
+pub struct DebtServiceRecord {
+    pub meter_id: u64,
+    pub user: Address,
+    pub amount_diverted: i128,
+    pub timestamp: u64,
+}
+
 // Task #4: Sub-DAO Hierarchical Permissions
 #[contracttype]
 #[derive(Clone)]
@@ -316,7 +329,7 @@ pub enum DataKey {
     Contributor(u64, Address),
     AuthorizedContributor(u64, Address),
     // Task #2: Tax Compliance
-    GovernmentVault(Address),
+    GovernmentVault,
     TaxRateBps, // Tax rate in basis points (e.g., 500 = 5%)
     // Task #3: Self-Maintenance
     MaintenanceFund(u64), // Per-meter maintenance fund balance
@@ -342,6 +355,7 @@ pub enum DataKey {
     // Task #4: Sub-DAO
     SubDaoConfig(Address),
     SoroSusuContract,
+    DebtServiceRecord(u64), // Per-meter record of last debt service diversion
 }
 
 #[contracterror]
@@ -466,6 +480,9 @@ const LEDGER_LIFETIME_EXTENSION: u32 = 1_000_000; // Extend by 1M ledgers
 
 // Task #4: Wasm Hash Rotation Constants
 const UPGRADE_VETO_PERIOD_SECONDS: u64 = 7 * DAY_IN_SECONDS; // 7 days veto period
+
+// Inter-Protocol Debt Service Constants
+const DEBT_SERVICE_DIVERT_BPS: i128 = 500; // 5% of maintenance fund diverted per call
 
 /// Round XLM amount to nearest minimum increment (0.0000001 XLM)
 /// This prevents value loss over time due to truncation
@@ -656,7 +673,7 @@ fn get_platform_fee_bps_impl(env: &Env, user: &Address) -> i128 {
     // Issue #124: Loyalty-Based Staking Fee Reduction
     if let Some(vault_address) = env.storage().instance().get::<DataKey, Address>(&DataKey::VestingVault) {
         let vault_client = VestingVaultClient::new(env, &vault_address);
-        if vault_client.get_staked_balance(user.clone()) > 0 {
+        if vault_client.get_staked_balance(&user) > 0 {
             return base_fee / 2; // 50% discount for staked users
         }
     }
@@ -1036,6 +1053,9 @@ fn register_meter_internal(
         credit_drip_rate: 0,
         is_closed: false,
         priority_index,
+        off_peak_reward_rate_bps: 0,
+        milestone_deadline: 0,
+        milestone_confirmed: true,
     };
 
     env.storage().instance().set(&DataKey::Meter(count), &meter);
@@ -1076,7 +1096,7 @@ fn calculate_required_buffer(env: &Env, user: &Address, daily_rate: i128) -> i12
     let sorosusu_contract = get_sorosusu_contract(env);
     let client = SoroSusuClient::new(env, &sorosusu_contract);
 
-    let is_trusted = client.is_trusted_saver(user.clone());
+    let is_trusted = client.is_trusted_saver(user);
 
     let buffer_days = if is_trusted {
         TRUSTED_BUFFER_DAYS
@@ -1193,7 +1213,7 @@ fn propose_upgrade_impl(env: &Env, new_wasm_hash: BytesN<32>, proposer: &Address
         .set(&DataKey::VetoDeadline, &veto_deadline);
 
     env.events().publish(
-        soroban_sdk::symbol_short!("UpgrdPrp"),
+        (soroban_sdk::symbol_short!("UpgrdPrp"),),
         (new_wasm_hash, now, veto_deadline),
     );
 
@@ -1213,7 +1233,7 @@ fn submit_veto(env: &Env, user: &Address, proposal_id: u64) {
         .set(&DataKey::UserVetoed(user.clone(), proposal_id), &true);
 
     env.events()
-        .publish(soroban_sdk::symbol_short!("VetoSubmt"), (user, proposal_id));
+        .publish((soroban_sdk::symbol_short!("VetoSubmt"),), (user, proposal_id));
 }
 
 fn can_finalize_upgrade(env: &Env) -> bool {
@@ -1365,7 +1385,7 @@ impl UtilityContract {
             // Reward the referrer if they have a meter? (simplified for now: just record it)
             env.storage()
                 .instance()
-                .set(&DataKey::Referral(user), &referrer);
+                .set(&DataKey::Referral(user.clone()), &referrer);
 
             env.events()
                 .publish((symbol_short!("Referral"), meter_id), (referrer, user));
@@ -1391,31 +1411,8 @@ impl UtilityContract {
             token,
             billing_type,
             device_public_key,
-            is_paired: false,
-            grace_period_start: 0,
-            is_paused: false,
-            tier_threshold: 0,
-            tier_rate: 0,
-            is_disputed: false,
-            challenge_timestamp: 0,
-            credit_drip_rate: 0,
-            is_closed: false,
-            priority_index, // Task #1: Set priority index
-            off_peak_reward_rate_bps: 0,
-            milestone_deadline: 0,
-            milestone_confirmed: true,
-        };
-
-        env.storage().instance().set(&DataKey::Meter(count), &meter);
-        env.storage().instance().set(&DataKey::Count, &count);
-
-        // Initialize provider total pool (new meter starts with 0 value)
-        let current_pool = get_provider_total_pool_impl(&env, &provider);
-        env.storage()
-            .instance()
-            .set(&DataKey::ProviderTotalPool(provider), &current_pool);
-
-        count
+            0,
+        )
     }
 
     pub fn batch_register_meters(env: Env, meter_infos: Vec<MeterInfo>) -> BatchCreatedEvent {
@@ -1494,6 +1491,9 @@ impl UtilityContract {
                 credit_drip_rate: 0,
                 is_closed: false,
                 priority_index: 0,
+                off_peak_reward_rate_bps: 0,
+                milestone_deadline: 0,
+                milestone_confirmed: true,
             };
 
             env.storage().instance().set(&DataKey::Meter(count), &meter);
@@ -1713,7 +1713,9 @@ impl UtilityContract {
         meter.provider.require_auth();
 
         // Verify the signature and pairing
-        verify_usage_signature(&env, &signed_data, &meter)?;
+        if let Err(e) = verify_usage_signature(&env, &signed_data, &meter) {
+            panic_with_error!(&env, e);
+        }
 
         // Task #88: Kill-Switch Check
         if meter.is_disputed {
@@ -1731,7 +1733,6 @@ impl UtilityContract {
         let effective_rate = get_effective_rate(
             &meter,
             signed_data.timestamp,
-            signed_data.is_renewable_energy,
         );
         let cost = signed_data.units_consumed.saturating_mul(effective_rate);
 
@@ -1880,125 +1881,8 @@ impl UtilityContract {
                     &gov_vault,
                     &settlement.tax_amount,
                 );
-
-                let tax_rate_bps = get_tax_rate_or_default(&env);
-                let (tax_amount, after_tax_amount) = calculate_tax_split(payout, tax_rate_bps);
-                
-                if tax_amount > 0 {
-                    // Transfer tax to government vault if configured
-                    if let Some(gov_vault) = get_government_vault_or_default(&env) {
-                        client.transfer(&env.current_contract_address(), &gov_vault, &tax_amount);
-                        
-                        // Emit TaxReceipt event
-                        let tax_receipt = TaxReceipt {
-                            meter_id,
-                            total_amount: claimable,
-                            tax_amount,
-                            net_amount: after_tax_amount,
-                            tax_rate_bps,
-                            government_vault: gov_vault.clone(),
-                            timestamp: now,
-                        };
-                        env.events().publish(
-                            (soroban_sdk::symbol_short!("TaxRcpt"), meter_id),
-                            tax_receipt,
-                        );
-                    }
-                }
-                
-                payout = after_tax_amount;
-
-                // Protocol fee (existing logic)
-                if let Some(wallet) = env
-                    .storage()
-                    .instance()
-                    .get::<_, Address>(&DataKey::MaintenanceWallet)
-                {
-                    let fee_bps = get_platform_fee_bps_impl(&env, &meter.user);
-                    let fee = (payout * fee_bps) / 10000;
-                    payout -= fee;
-                    if fee > 0 {
-                        client.transfer(&env.current_contract_address(), &wallet, &fee);
-                    }
-                }
-                if payout > 0 {
-                    client.transfer(&env.current_contract_address(), &meter.provider, &payout);
-                }
-                meter.balance -= claimable;
-                meter.claimed_this_hour += claimable;
-                
-                // If credit drip was active, reduce the debt if in PostPaid mode
-                if meter.billing_type == BillingType::PostPaid && meter.credit_drip_rate > 0 {
-                    let credit_settlement = (elapsed as i128).saturating_mul(meter.credit_drip_rate).min(meter.debt);
-                    meter.debt = meter.debt.saturating_sub(credit_settlement);
-                }
             }
-        } else {
-            // New hour, reset claimed_this_hour
-            meter.claimed_this_hour = 0;
-
-            // Ensure we don't exceed debt threshold
-            let claimable = if amount > meter.balance && meter.balance - amount >= DEBT_THRESHOLD {
-                amount
-            } else if amount > meter.balance {
-                meter.balance - DEBT_THRESHOLD // Allow going down to threshold
-            } else {
-                amount
-            };
-
-            if claimable > 0 {
-                let client = token::Client::new(&env, &meter.token);
-                let mut payout = claimable;
-
-                // Task #3: Allocate to maintenance fund (0.01% = 1 basis point)
-                allocate_to_maintenance_fund(&env, meter_id, claimable);
-
-                // Task #2: Tax Compliance - Split tax before provider payout
-                let tax_rate_bps = get_tax_rate_or_default(&env);
-                let (tax_amount, after_tax_amount) = calculate_tax_split(payout, tax_rate_bps);
-                
-                if tax_amount > 0 {
-                    // Transfer tax to government vault if configured
-                    if let Some(gov_vault) = get_government_vault_or_default(&env) {
-                        client.transfer(&env.current_contract_address(), &gov_vault, &tax_amount);
-                        
-                        // Emit TaxReceipt event
-                        let tax_receipt = TaxReceipt {
-                            meter_id,
-                            total_amount: claimable,
-                            tax_amount,
-                            net_amount: after_tax_amount,
-                            tax_rate_bps,
-                            government_vault: gov_vault.clone(),
-                            timestamp: now,
-                        };
-                        env.events().publish(
-                            (soroban_sdk::symbol_short!("TaxRcpt"), meter_id),
-                            tax_receipt,
-                        );
-                    }
-                }
-                
-                payout = after_tax_amount;
-
-                // Protocol fee (existing logic)
-                if let Some(wallet) = env
-                    .storage()
-                    .instance()
-                    .get::<_, Address>(&DataKey::MaintenanceWallet)
-                {
-                    let fee_bps = get_platform_fee_bps_impl(&env, &meter.user);
-                    let fee = (payout * fee_bps) / 10000;
-                    payout -= fee;
-                    if fee > 0 {
-                        client.transfer(&env.current_contract_address(), &wallet, &fee);
-                    }
-                }
-                if payout > 0 {
-                    client.transfer(&env.current_contract_address(), &meter.provider, &payout);
-                }
-                meter.balance -= claimable;
-                meter.claimed_this_hour = claimable;
+        }
 
         if settlement.protocol_fee > 0 {
             if let Some(wallet) = env
@@ -2034,7 +1918,6 @@ impl UtilityContract {
             .instance()
             .set(&DataKey::Meter(meter_id), &meter);
     }
-
     pub fn update_usage(env: Env, meter_id: u64, watt_hours_consumed: i128) {
         // Input validation for security
         if watt_hours_consumed < 0 {
@@ -2329,10 +2212,6 @@ impl UtilityContract {
         }
     }
 
-    pub fn get_provider_total_pool(env: Env, provider: Address) -> i128 {
-        get_provider_total_pool_impl(&env, &provider)
-    }
-
     pub fn is_meter_offline(env: Env, meter_id: u64) -> bool {
         match env
             .storage()
@@ -2344,10 +2223,6 @@ impl UtilityContract {
             }
             None => true,
         }
-    }
-
-    pub fn get_watt_hours_display(watt_hours: i128, precision_factor: i128) -> i128 {
-        watt_hours / precision_factor
     }
 
     /// Unlink a meter from its current tenant and link it to a new tenant.
@@ -2972,15 +2847,15 @@ impl UtilityContract {
             _ => return, // No active webhook configured
         };
 
-        // Calculate hours remaining
-        let hours_remaining = if meter.rate_per_second > 0 {
-            meter.balance as f32 / meter.rate_per_second as f32 / 3600.0
+        // Calculate hours remaining (x100 for 2 decimal precision, no f32)
+        let hours_remaining_x100 = if meter.rate_per_second > 0 {
+            meter.balance * 100 / (meter.rate_per_second * 3600)
         } else {
-            f32::INFINITY
+            i128::MAX // effectively infinite
         };
 
         // Check if balance is low (< 24 hours)
-        if hours_remaining < 24.0 {
+        if hours_remaining_x100 < 2400 {
             // Check if we've sent an alert recently (within last 12 hours)
             let current_time = env.ledger().timestamp();
             let last_alert_time: Option<u64> =
@@ -2998,7 +2873,7 @@ impl UtilityContract {
                 meter_id,
                 user: meter.user.clone(),
                 remaining_balance: meter.balance,
-                hours_remaining,
+                hours_remaining_x100,
                 timestamp: current_time,
             };
 
@@ -4143,6 +4018,95 @@ impl UtilityContract {
             (symbol_short!("MstoneConf"), meter_id),
             env.ledger().timestamp(),
         );
+    }
+
+    // ==================== INTER-PROTOCOL DEBT SERVICE ====================
+
+    /// Automatic Debt Service hook: if the meter's user is flagged as "in default"
+    /// on SoroSusu, diverts 5% of this meter's maintenance fund to settle the debt.
+    ///
+    /// This implements the "Unified Financial Identity" cross-protocol reconciliation:
+    /// a user's Utility Drip maintenance fund acts as a backstop for their SoroSusu
+    /// obligations, reducing systemic risk across the SocialFi ecosystem.
+    ///
+    /// Anyone may call this function; the SoroSusu contract is the authoritative
+    /// source of truth for default status. The diversion is a no-op if:
+    ///   - SoroSusu contract is not configured
+    ///   - The user is not in default
+    ///   - The maintenance fund is empty
+    pub fn service_sorosusu_debt(env: Env, meter_id: u64) {
+        let meter = get_meter_or_panic(&env, meter_id);
+
+        // Resolve SoroSusu contract; silently skip if not configured
+        let sorosusu_addr: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SoroSusuContract);
+
+        let sorosusu_addr = match sorosusu_addr {
+            Some(addr) => addr,
+            None => return,
+        };
+
+        let susu_client = SoroSusuClient::new(&env, &sorosusu_addr);
+
+        // Check default status — no-op if user is in good standing
+        if !susu_client.is_in_default(&meter.user) {
+            return;
+        }
+
+        // Read current maintenance fund balance
+        let fund_balance = get_maintenance_fund_balance(&env, meter_id);
+        if fund_balance <= 0 {
+            return;
+        }
+
+        // Calculate 5% diversion
+        let divert_amount = (fund_balance * DEBT_SERVICE_DIVERT_BPS) / 10_000;
+        if divert_amount <= 0 {
+            return;
+        }
+
+        // Deduct from maintenance fund
+        let new_fund = fund_balance.saturating_sub(divert_amount);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaintenanceFund(meter_id), &new_fund);
+
+        // Transfer tokens from contract to SoroSusu contract on behalf of the user
+        let token_client = token::Client::new(&env, &meter.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &sorosusu_addr,
+            &divert_amount,
+        );
+
+        // Notify SoroSusu of the payment so it can update the user's debt ledger
+        susu_client.record_debt_payment(&meter.user, &divert_amount);
+
+        // Persist a record of this diversion for auditability
+        let now = env.ledger().timestamp();
+        let record = DebtServiceRecord {
+            meter_id,
+            user: meter.user.clone(),
+            amount_diverted: divert_amount,
+            timestamp: now,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DebtServiceRecord(meter_id), &record);
+
+        env.events().publish(
+            (symbol_short!("DebtSvc"), meter_id),
+            (meter.user, divert_amount, new_fund),
+        );
+    }
+
+    /// Return the most recent debt service record for a meter, if any.
+    pub fn get_debt_service_record(env: Env, meter_id: u64) -> Option<DebtServiceRecord> {
+        env.storage()
+            .instance()
+            .get(&DataKey::DebtServiceRecord(meter_id))
     }
 }
 
