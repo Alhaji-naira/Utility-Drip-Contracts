@@ -1,6 +1,4 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Symbol};
-
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
@@ -23,6 +21,16 @@ pub trait PriceOracle {
 pub trait SoroSusu {
     fn get_susu_score(env: Env, user: Address) -> u32;
     fn is_trusted_saver(env: Env, user: Address) -> bool;
+}
+
+#[contractclient(name = "VestingVaultClient")]
+pub trait VestingVault {
+    fn get_staked_balance(env: Env, user: Address) -> i128;
+}
+
+#[contractclient(name = "NFTMinterClient")]
+pub trait NFTMinter {
+    fn mint_receipt_nft(env: Env, to: Address, meter_id: u64, cycle_index: u32);
 }
 
 #[contracttype]
@@ -274,6 +282,8 @@ pub enum DataKey {
     MaintenanceWallet,
     ProtocolFeeBps,
     SupportedToken(Address),
+    VestingVault,
+    NFTMinter,
     SupportedWithdrawalToken(Address),
     ProviderTotalPool(Address),
     Referral(Address),
@@ -283,6 +293,7 @@ pub enum DataKey {
     WebhookConfig(Address),
     LastAlert(u64),
     ClosingFeeBps,
+    CycleIndex(u64),
     Contributor(u64, Address),
     AuthorizedContributor(u64, Address),
     // Task #2: Tax Compliance
@@ -607,6 +618,19 @@ fn convert_usd_to_token_if_needed(env: &Env, usd_cents: i128, destination_token:
     }
 }
 
+fn get_platform_fee_bps_impl(env: &Env, user: &Address) -> i128 {
+    let base_fee: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+    
+    // Issue #124: Loyalty-Based Staking Fee Reduction
+    if let Some(vault_address) = env.storage().instance().get::<DataKey, Address>(&DataKey::VestingVault) {
+        let vault_client = VestingVaultClient::new(env, &vault_address);
+        if vault_client.get_staked_balance(user.clone()) > 0 {
+            return base_fee / 2; // 50% discount for staked users
+        }
+    }
+    base_fee
+}
+
 fn remaining_postpaid_collateral(meter: &Meter) -> i128 {
     meter.collateral_limit.saturating_sub(meter.debt).max(0)
 }
@@ -649,7 +673,7 @@ fn provider_meter_value(meter: &Meter) -> i128 {
 }
 
 fn refresh_activity(meter: &mut Meter, now: u64) {
-    if meter.is_paused {
+    if meter.is_paused || meter.is_closed {
         meter.is_active = false;
         return;
     }
@@ -985,6 +1009,14 @@ impl UtilityContract {
         env.storage()
             .instance()
             .set(&DataKey::Oracle, &oracle_address);
+    }
+
+    pub fn set_vesting_vault(env: Env, vault: Address) {
+        env.storage().instance().set(&DataKey::VestingVault, &vault);
+    }
+
+    pub fn set_nft_minter(env: Env, minter: Address) {
+        env.storage().instance().set(&DataKey::NFTMinter, &minter);
     }
 
     pub fn set_maintenance_config(env: Env, wallet: Address, fee_bps: i128) {
@@ -1548,6 +1580,20 @@ impl UtilityContract {
         // Task #89: Update monthly volume
         let now = env.ledger().timestamp();
         if now.saturating_sub(meter.usage_data.last_volume_reset) >= (30 * DAY_IN_SECONDS) {
+            // Issue #121: Automated trigger for Utility Receipt NFT
+            if meter.usage_data.monthly_volume > 0 {
+                if let Some(minter_addr) = env.storage().instance().get::<DataKey, Address>(&DataKey::NFTMinter) {
+                    let cycle_index: u32 = env.storage().instance().get(&DataKey::CycleIndex(signed_data.meter_id)).unwrap_or(0);
+                    let next_cycle = cycle_index + 1;
+                    
+                    let minter = NFTMinterClient::new(&env, &minter_addr);
+                    minter.mint_receipt_nft(&meter.user, &signed_data.meter_id, &next_cycle);
+                    
+                    env.storage().instance().set(&DataKey::CycleIndex(signed_data.meter_id), &next_cycle);
+                    env.events().publish((symbol_short!("NFTMint"), signed_data.meter_id), next_cycle);
+                }
+            }
+
             meter.usage_data.monthly_volume = cost;
             meter.usage_data.last_volume_reset = now;
         } else {
@@ -1653,11 +1699,7 @@ impl UtilityContract {
                     .instance()
                     .get::<_, Address>(&DataKey::MaintenanceWallet)
                 {
-                    let fee_bps: i128 = env
-                        .storage()
-                        .instance()
-                        .get(&DataKey::ProtocolFeeBps)
-                        .unwrap_or(0);
+                    let fee_bps = get_platform_fee_bps_impl(&env, &meter.user);
                     let fee = (payout * fee_bps) / 10000;
                     payout -= fee;
                     if fee > 0 {
@@ -1730,11 +1772,7 @@ impl UtilityContract {
                     .instance()
                     .get::<_, Address>(&DataKey::MaintenanceWallet)
                 {
-                    let fee_bps: i128 = env
-                        .storage()
-                        .instance()
-                        .get(&DataKey::ProtocolFeeBps)
-                        .unwrap_or(0);
+                    let fee_bps = get_platform_fee_bps_impl(&env, &meter.user);
                     let fee = (payout * fee_bps) / 10000;
                     payout -= fee;
                     if fee > 0 {
@@ -1810,6 +1848,20 @@ impl UtilityContract {
     pub fn reset_cycle_usage(env: Env, meter_id: u64) {
         let mut meter = get_meter_or_panic(&env, meter_id);
         meter.provider.require_auth();
+
+        // Check for cycle completion manually if provider resets
+        let now = env.ledger().timestamp();
+        if now.saturating_sub(meter.usage_data.last_volume_reset) >= (30 * DAY_IN_SECONDS) && meter.usage_data.current_cycle_watt_hours > 0 {
+            if let Some(minter_addr) = env.storage().instance().get::<DataKey, Address>(&DataKey::NFTMinter) {
+                let cycle_index: u32 = env.storage().instance().get(&DataKey::CycleIndex(meter_id)).unwrap_or(0);
+                let next_cycle = cycle_index + 1;
+                let minter = NFTMinterClient::new(&env, &minter_addr);
+                minter.mint_receipt_nft(&meter.user, &meter_id, &next_cycle);
+                env.storage().instance().set(&DataKey::CycleIndex(meter_id), &next_cycle);
+            }
+        }
+
+        meter.usage_data.last_volume_reset = now;
         meter.usage_data.current_cycle_watt_hours = 0;
         meter.usage_data.last_reading_timestamp = env.ledger().timestamp();
         env.storage()
@@ -2293,6 +2345,12 @@ impl UtilityContract {
             (symbol_short!("PathPayment"), meter_id), 
             (meter.token, destination_token, amount_usd_cents, withdrawal_amount)
         );
+
+        // Issue #107: Cross-Border Settlement Event for Inter-Anchor communication
+        env.events().publish(
+            (symbol_short!("XBorder"), meter_id),
+            (meter.provider.clone(), destination_token, withdrawal_amount)
+        );
     }
 
     /// Get supported withdrawal tokens for a provider
@@ -2588,6 +2646,7 @@ impl UtilityContract {
         if final_claimable > 0 {
             let client = token::Client::new(&env, &meter.token);
             client.transfer(&env.current_contract_address(), &meter.provider, &final_claimable);
+            
             meter.balance -= final_claimable;
             meter.claimed_this_hour += final_claimable;
 
