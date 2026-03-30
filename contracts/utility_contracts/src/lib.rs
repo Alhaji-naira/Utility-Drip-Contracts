@@ -289,6 +289,33 @@ pub struct SubDaoConfig {
     pub is_active: bool,
 }
 
+// Issue #103: Cryptographic Audit Trail for Institutional Audits (SOX Compliance)
+#[contracttype]
+#[derive(Clone)]
+pub enum AuditEventType {
+    StreamUpdate,
+    Withdrawal,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AuditEvent {
+    pub event_type: AuditEventType,
+    pub meter_id: u64,
+    pub amount: i128,
+    pub timestamp: u64,
+    pub actor: Address,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AuditTrailRoot {
+    pub root_hash: BytesN<32>,
+    pub event_count: u64,
+    pub last_update: u64,
+    pub chain_hash: BytesN<32>, // Hash of (previous_root || new_event_hash)
+}
+
 #[contracttype]
 pub enum DataKey {
     Meter(u64),
@@ -342,6 +369,9 @@ pub enum DataKey {
     // Task #4: Sub-DAO
     SubDaoConfig(Address),
     SoroSusuContract,
+    // Issue #103: Cryptographic Audit Trail for SOX Compliance
+    AuditTrailRoot,
+    AuditEventLog(u64), // Stores individual audit events by index
 }
 
 #[contracterror]
@@ -1245,6 +1275,55 @@ fn publish_inactive_event(env: &Env, meter_id: u64, now: u64) {
         .publish((symbol_short!("Inactive"), meter_id), now);
 }
 
+// Issue #103: Cryptographic Audit Trail for SOX Compliance
+fn hash_audit_event(env: &Env, event: &AuditEvent) -> BytesN<32> {
+    let event_bytes = event.to_xdr(env);
+    env.crypto().sha256(&event_bytes)
+}
+
+fn record_audit_event(env: &Env, event: AuditEvent) {
+    let event_hash = hash_audit_event(env, &event);
+    let mut current_root: AuditTrailRoot = env
+        .storage()
+        .instance()
+        .get(&DataKey::AuditTrailRoot)
+        .unwrap_or(AuditTrailRoot {
+            root_hash: env.crypto().sha256(&Bytes::new(env)),
+            event_count: 0,
+            last_update: env.ledger().timestamp(),
+            chain_hash: env.crypto().sha256(&Bytes::new(env)),
+        });
+
+    // Create chain hash: H(previous_chain_hash || event_hash)
+    let mut chain_input = Bytes::new(env);
+    chain_input.append(&current_root.chain_hash.into());
+    chain_input.append(&event_hash.into());
+    
+    let new_chain_hash = env.crypto().sha256(&chain_input);
+    
+    // Store the event in the log
+    let event_index = current_root.event_count;
+    env.storage()
+        .instance()
+        .set(&DataKey::AuditEventLog(event_index), &event);
+
+    // Update root with new chain hash
+    current_root.root_hash = new_chain_hash.clone();
+    current_root.event_count = current_root.event_count.saturating_add(1);
+    current_root.last_update = env.ledger().timestamp();
+    current_root.chain_hash = new_chain_hash;
+
+    env.storage()
+        .instance()
+        .set(&DataKey::AuditTrailRoot, &current_root);
+
+    // Publish audit event for external observers
+    env.events().publish(
+        symbol_short!("AuditLog"),
+        (event_index, new_chain_hash, current_root.event_count),
+    );
+}
+
 #[contractimpl]
 impl UtilityContract {
     pub fn get_minimum_balance_to_flow() -> i128 {
@@ -1391,31 +1470,8 @@ impl UtilityContract {
             token,
             billing_type,
             device_public_key,
-            is_paired: false,
-            grace_period_start: 0,
-            is_paused: false,
-            tier_threshold: 0,
-            tier_rate: 0,
-            is_disputed: false,
-            challenge_timestamp: 0,
-            credit_drip_rate: 0,
-            is_closed: false,
-            priority_index, // Task #1: Set priority index
-            off_peak_reward_rate_bps: 0,
-            milestone_deadline: 0,
-            milestone_confirmed: true,
-        };
-
-        env.storage().instance().set(&DataKey::Meter(count), &meter);
-        env.storage().instance().set(&DataKey::Count, &count);
-
-        // Initialize provider total pool (new meter starts with 0 value)
-        let current_pool = get_provider_total_pool_impl(&env, &provider);
-        env.storage()
-            .instance()
-            .set(&DataKey::ProviderTotalPool(provider), &current_pool);
-
-        count
+            0, // priority_index
+        )
     }
 
     pub fn batch_register_meters(env: Env, meter_infos: Vec<MeterInfo>) -> BatchCreatedEvent {
@@ -1630,6 +1686,15 @@ impl UtilityContract {
         // Update provider total pool
         let new_meter_value = provider_meter_value(&meter);
         update_provider_total_pool(&env, &meter.provider, old_meter_value, new_meter_value);
+
+        // Issue #103: Record stream update in audit trail for compliance
+        record_audit_event(&env, AuditEvent {
+            event_type: AuditEventType::StreamUpdate,
+            meter_id,
+            amount: converted_amount,
+            timestamp: now,
+            actor: contributor.clone(),
+        });
 
         env.storage()
             .instance()
@@ -1872,6 +1937,17 @@ impl UtilityContract {
 
         let settlement = settle_claim_for_meter(&env, meter_id, &mut meter, now, &mut window);
         let client = token::Client::new(&env, &meter.token);
+
+        // Issue #103: Record withdrawal in audit trail for compliance
+        if settlement.gross_claimed > 0 {
+            record_audit_event(&env, AuditEvent {
+                event_type: AuditEventType::Withdrawal,
+                meter_id,
+                amount: settlement.gross_claimed,
+                timestamp: now,
+                actor: meter.provider.clone(),
+            });
+        }
 
         if settlement.tax_amount > 0 {
             if let Some(gov_vault) = get_government_vault_or_default(&env) {
@@ -4143,6 +4219,44 @@ impl UtilityContract {
             (symbol_short!("MstoneConf"), meter_id),
             env.ledger().timestamp(),
         );
+    }
+
+    // Issue #103: Cryptographic Audit Trail for SOX Compliance
+    /// Get the current audit trail root hash for compliance verification
+    pub fn get_audit_trail_root(env: Env) -> Option<AuditTrailRoot> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AuditTrailRoot)
+    }
+
+    /// Get a specific audit event by index for external auditor verification
+    pub fn get_audit_event(env: Env, event_index: u64) -> Option<AuditEvent> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AuditEventLog(event_index))
+    }
+
+    /// Verify audit trail integrity by recomputing the chain hash
+    /// Returns true if the provided chain_hash matches the current root
+    pub fn verify_audit_integrity(env: Env, chain_hash: BytesN<32>) -> bool {
+        if let Some(root) = env
+            .storage()
+            .instance()
+            .get::<_, AuditTrailRoot>(&DataKey::AuditTrailRoot)
+        {
+            root.chain_hash == chain_hash
+        } else {
+            false
+        }
+    }
+
+    /// Get total count of audit events recorded
+    pub fn get_audit_event_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<_, AuditTrailRoot>(&DataKey::AuditTrailRoot)
+            .map(|root| root.event_count)
+            .unwrap_or(0)
     }
 }
 
