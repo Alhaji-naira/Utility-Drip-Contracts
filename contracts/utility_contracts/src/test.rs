@@ -3,73 +3,7 @@
 
 use super::*;
 use soroban_sdk::testutils::{Address as _, Ledger};
-use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, token, Address, BytesN, Env, Vec};
-
-#[contracttype]
-#[derive(Clone)]
-enum OracleDataKey {
-    Price,
-}
-
-#[contract]
-struct MockOracle;
-
-#[contractimpl]
-impl MockOracle {
-    fn set_price(env: Env, price: i128, decimals: u32, last_updated: u64) {
-        let data = PriceData {
-            price,
-            decimals,
-            last_updated,
-        };
-        env.storage().instance().set(&OracleDataKey::Price, &data);
-    }
-
-    fn get_price(env: Env) -> PriceData {
-        env.storage()
-            .instance()
-            .get(&OracleDataKey::Price)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::OracleNotSet))
-    }
-
-    fn xlm_to_usd_cents(env: Env, xlm_amount: i128) -> i128 {
-        let price = Self::get_price(env).price;
-        xlm_amount.saturating_mul(price)
-    }
-
-    fn usd_cents_to_xlm(env: Env, usd_cents: i128) -> i128 {
-        let price = Self::get_price(env).price;
-        if price <= 0 {
-            0
-        } else {
-            usd_cents / price
-        }
-    }
-}
-
-fn setup_meter_and_oracle(env: &Env, stale: bool) -> (UtilityContractClient<'_>, Address, u64, Address) {
-    let contract_id = env.register_contract(None, UtilityContract);
-    let client = UtilityContractClient::new(env, &contract_id);
-
-    let user = Address::generate(env);
-    let provider = Address::generate(env);
-    let token_address = create_token(env);
-    let meter_id = client.register_meter(&user, &provider, &10, &token_address, &device_key(env, 3));
-
-    let oracle_id = env.register_contract(None, MockOracle);
-    let oracle_client = MockOracleClient::new(env, &oracle_id);
-    client.set_oracle(&oracle_id);
-
-    let now = env.ledger().timestamp();
-    let heartbeat = if stale {
-        now.saturating_sub(72 * 60 * 60 + 1)
-    } else {
-        now.saturating_sub(60)
-    };
-    oracle_client.set_price(&100, &2, &heartbeat);
-
-    (client, token_address, meter_id, user)
-}
+use soroban_sdk::{token, Address, BytesN, Env, Vec};
 
 fn device_key(env: &Env, byte: u8) -> BytesN<32> {
     BytesN::from_array(env, &[byte; 32])
@@ -263,160 +197,319 @@ fn test_batch_register_meters_empty_vector_panics() {
     client.batch_register_meters(&empty);
 }
 
+// ==================== INTER-PROTOCOL DEBT SERVICE TESTS ====================
+
+/// Minimal mock SoroSusu contract used only in tests.
+/// Stores a single boolean per user: whether they are in default.
+#[cfg(test)]
+mod mock_sorosusu {
+    use soroban_sdk::{contract, contractimpl, Address, Env};
+
+    #[contract]
+    pub struct MockSoroSusu;
+
+    #[contractimpl]
+    impl MockSoroSusu {
+        pub fn set_default(env: Env, user: Address, in_default: bool) {
+            env.storage().instance().set(&user, &in_default);
+        }
+
+        pub fn is_in_default(env: Env, user: Address) -> bool {
+            env.storage().instance().get(&user).unwrap_or(false)
+        }
+
+        pub fn is_trusted_saver(_env: Env, _user: Address) -> bool {
+            false
+        }
+
+        pub fn get_susu_score(_env: Env, _user: Address) -> u32 {
+            0
+        }
+
+        /// Records a debt payment — in tests we just store the cumulative amount.
+        pub fn record_debt_payment(env: Env, user: Address, amount: i128) {
+            let key = (user.clone(), soroban_sdk::symbol_short!("paid"));
+            let current: i128 = env.storage().instance().get(&key).unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&key, &current.saturating_add(amount));
+        }
+    }
+}
+
 #[test]
-fn test_trust_mode_boundary_72_hours() {
+fn test_service_sorosusu_debt_diverts_5_percent_of_maintenance_fund() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
+
+    // Deploy utility contract
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
+
+    // Deploy mock SoroSusu
+    let susu_id = env.register_contract(None, mock_sorosusu::MockSoroSusu);
+    let susu_client = mock_sorosusu::MockSoroSusuClient::new(&env, &susu_id);
+
+    let user = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let token_address = create_token(&env);
+    let token_admin = token::StellarAssetClient::new(&env, &token_address);
+
+    token_admin.mint(&user, &100_000);
+
+    // Register and fund a meter so the maintenance fund accumulates
+    client.set_tax_rate(&0);
+    let meter_id = client.register_meter(&user, &provider, &10, &token_address, &device_key(&env, 42));
+    client.top_up(&meter_id, &100_000);
+
+    // Manually seed the maintenance fund (simulates accumulated 0.01% allocations)
+    // We do this by advancing time and claiming so allocate_to_maintenance_fund runs,
+    // but for simplicity we verify the function logic directly via a known fund balance.
+    // Seed: inject 10_000 into the maintenance fund via a claim cycle.
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1_000);
+    client.claim(&meter_id);
+
+    let fund_before = client.get_maintenance_fund(&meter_id);
+    // fund_before should be > 0 (1 bps of claimed amount)
+    assert!(fund_before > 0, "maintenance fund should be non-zero after claim");
+
+    // Wire up SoroSusu contract
+    set_sorosusu_contract(env.clone(), susu_id.clone());
+
+    // Mark user as in default on SoroSusu
+    susu_client.set_default(&user, &true);
+
+    // Trigger debt service
+    client.service_sorosusu_debt(&meter_id);
+
+    let fund_after = client.get_maintenance_fund(&meter_id);
+    let expected_divert = (fund_before * 500) / 10_000; // 5%
+    assert_eq!(
+        fund_before - fund_after,
+        expected_divert,
+        "exactly 5% should be diverted from the maintenance fund"
+    );
+
+    // Debt service record should be persisted
+    let record = client.get_debt_service_record(&meter_id).unwrap();
+    assert_eq!(record.meter_id, meter_id);
+    assert_eq!(record.user, user);
+    assert_eq!(record.amount_diverted, expected_divert);
+}
+
+#[test]
+fn test_service_sorosusu_debt_noop_when_user_not_in_default() {
+    let env = Env::default();
+    env.mock_all_auths();
 
     let contract_id = env.register_contract(None, UtilityContract);
     let client = UtilityContractClient::new(&env, &contract_id);
 
-    let oracle_id = env.register_contract(None, MockOracle);
-    let oracle_client = MockOracleClient::new(&env, &oracle_id);
-    client.set_oracle(&oracle_id);
+    let susu_id = env.register_contract(None, mock_sorosusu::MockSoroSusu);
 
-    let now = env.ledger().timestamp();
-    oracle_client.set_price(&100, &2, &(now - 72 * 60 * 60));
-    assert!(!client.is_trust_mode());
+    let user = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let token_address = create_token(&env);
+    let token_admin = token::StellarAssetClient::new(&env, &token_address);
+    token_admin.mint(&user, &100_000);
 
-    oracle_client.set_price(&100, &2, &(now - 72 * 60 * 60 - 1));
-    assert!(client.is_trust_mode());
+    client.set_tax_rate(&0);
+    let meter_id = client.register_meter(&user, &provider, &10, &token_address, &device_key(&env, 43));
+    client.top_up(&meter_id, &100_000);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1_000);
+    client.claim(&meter_id);
+
+    let fund_before = client.get_maintenance_fund(&meter_id);
+
+    set_sorosusu_contract(env.clone(), susu_id.clone());
+    // user is NOT in default — no diversion should happen
+
+    client.service_sorosusu_debt(&meter_id);
+
+    let fund_after = client.get_maintenance_fund(&meter_id);
+    assert_eq!(fund_before, fund_after, "fund should be unchanged when user is not in default");
+    assert!(client.get_debt_service_record(&meter_id).is_none());
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #52)")]
-fn test_healthy_oracle_blocks_emergency_proposal() {
+fn test_service_sorosusu_debt_noop_when_sorosusu_not_configured() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
 
-    let (client, _token, meter_id, member) = setup_meter_and_oracle(&env, false);
-    client.register_active_user(&member);
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
 
-    client.propose_emergency_flow_rate(&member, &meter_id, &9999);
+    let user = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let token_address = create_token(&env);
+    let token_admin = token::StellarAssetClient::new(&env, &token_address);
+    token_admin.mint(&user, &100_000);
+
+    client.set_tax_rate(&0);
+    let meter_id = client.register_meter(&user, &provider, &10, &token_address, &device_key(&env, 44));
+    client.top_up(&meter_id, &100_000);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1_000);
+    client.claim(&meter_id);
+
+    let fund_before = client.get_maintenance_fund(&meter_id);
+
+    // SoroSusu contract is NOT configured — should be a silent no-op
+    client.service_sorosusu_debt(&meter_id);
+
+    assert_eq!(fund_before, client.get_maintenance_fund(&meter_id));
+}
+
+// ==================== PROVIDER RELIABILITY SCORE TESTS ====================
+
+#[test]
+fn test_reliability_score_gold_badge_at_99_percent_uptime() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    client.set_oracle(&oracle);
+
+    // Report 99 online out of 100 windows => 9900 bps => Gold
+    for _ in 0..99u32 {
+        client.report_provider_uptime(&provider, &true);
+    }
+    client.report_provider_uptime(&provider, &false);
+
+    let score = client.get_reliability_score(&provider).unwrap();
+    assert_eq!(score.windows_total, 100);
+    assert_eq!(score.windows_online, 99);
+    assert_eq!(score.score_bps, 9900);
+    assert_eq!(score.badge, ReliabilityBadge::Gold);
+
+    assert_eq!(client.get_reliability_badge(&provider), ReliabilityBadge::Gold);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #56)")]
-fn test_unanimous_approval_required_before_execute() {
+fn test_reliability_score_silver_badge_at_95_percent_uptime() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
 
-    let (client, _token, meter_id, member_one) = setup_meter_and_oracle(&env, true);
-    let member_two = Address::generate(&env);
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
 
-    client.register_active_user(&member_one);
-    client.register_active_user(&member_two);
+    let oracle = Address::generate(&env);
+    let provider = Address::generate(&env);
 
-    let proposal_id = client.propose_emergency_flow_rate(&member_one, &meter_id, &7777);
-    client.execute_emergency_action(&member_one, &proposal_id);
+    client.set_oracle(&oracle);
+
+    // 95 online out of 100 => 9500 bps => Silver
+    for _ in 0..95u32 {
+        client.report_provider_uptime(&provider, &true);
+    }
+    for _ in 0..5u32 {
+        client.report_provider_uptime(&provider, &false);
+    }
+
+    let score = client.get_reliability_score(&provider).unwrap();
+    assert_eq!(score.score_bps, 9500);
+    assert_eq!(score.badge, ReliabilityBadge::Silver);
 }
 
 #[test]
-fn test_emergency_flow_rate_executes_after_unanimous_vote() {
+fn test_reliability_score_bronze_badge_at_90_percent_uptime() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
 
-    let (client, _token, meter_id, member_one) = setup_meter_and_oracle(&env, true);
-    let member_two = Address::generate(&env);
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
 
-    client.register_active_user(&member_one);
-    client.register_active_user(&member_two);
+    let oracle = Address::generate(&env);
+    let provider = Address::generate(&env);
 
-    let proposal_id = client.propose_emergency_flow_rate(&member_one, &meter_id, &8888);
-    client.approve_emergency_action(&member_two, &proposal_id);
-    client.execute_emergency_action(&member_one, &proposal_id);
+    client.set_oracle(&oracle);
 
-    let meter = client.get_meter(&meter_id).unwrap();
-    assert_eq!(meter.max_flow_rate_per_hour, 8888);
+    // 90 online out of 100 => 9000 bps => Bronze
+    for _ in 0..90u32 {
+        client.report_provider_uptime(&provider, &true);
+    }
+    for _ in 0..10u32 {
+        client.report_provider_uptime(&provider, &false);
+    }
+
+    let score = client.get_reliability_score(&provider).unwrap();
+    assert_eq!(score.score_bps, 9000);
+    assert_eq!(score.badge, ReliabilityBadge::Bronze);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #53)")]
-fn test_non_member_cannot_propose_emergency_action() {
+fn test_reliability_score_none_badge_below_90_percent() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
 
-    let (client, _token, meter_id, _registered_member) = setup_meter_and_oracle(&env, true);
-    let non_member = Address::generate(&env);
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
 
-    client.propose_emergency_pause(&non_member, &meter_id);
+    let oracle = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    client.set_oracle(&oracle);
+
+    // 80 online out of 100 => 8000 bps => None
+    for _ in 0..80u32 {
+        client.report_provider_uptime(&provider, &true);
+    }
+    for _ in 0..20u32 {
+        client.report_provider_uptime(&provider, &false);
+    }
+
+    let score = client.get_reliability_score(&provider).unwrap();
+    assert_eq!(score.score_bps, 8000);
+    assert_eq!(score.badge, ReliabilityBadge::None);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #17)")]
-fn test_duplicate_emergency_vote_rejected() {
+fn test_reliability_score_returns_none_for_unknown_provider() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
 
-    let (client, _token, meter_id, member_one) = setup_meter_and_oracle(&env, true);
-    let member_two = Address::generate(&env);
-    client.register_active_user(&member_one);
-    client.register_active_user(&member_two);
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
 
-    let proposal_id = client.propose_emergency_pause(&member_one, &meter_id);
-    client.approve_emergency_action(&member_two, &proposal_id);
-    client.approve_emergency_action(&member_two, &proposal_id);
+    let unknown = Address::generate(&env);
+
+    assert!(client.get_reliability_score(&unknown).is_none());
+    assert_eq!(client.get_reliability_badge(&unknown), ReliabilityBadge::None);
 }
 
 #[test]
-fn test_emergency_pause_executes_after_unanimous_vote() {
+fn test_reliability_score_accumulates_across_multiple_reports() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
 
-    let (client, _token, meter_id, member_one) = setup_meter_and_oracle(&env, true);
-    let member_two = Address::generate(&env);
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
 
-    client.register_active_user(&member_one);
-    client.register_active_user(&member_two);
+    let oracle = Address::generate(&env);
+    let provider = Address::generate(&env);
 
-    let proposal_id = client.propose_emergency_pause(&member_one, &meter_id);
-    client.approve_emergency_action(&member_two, &proposal_id);
-    client.execute_emergency_action(&member_one, &proposal_id);
+    client.set_oracle(&oracle);
 
-    let meter = client.get_meter(&meter_id).unwrap();
-    assert!(meter.is_paused);
-}
+    // First batch: 10/10 online => Gold
+    for _ in 0..10u32 {
+        client.report_provider_uptime(&provider, &true);
+    }
+    assert_eq!(client.get_reliability_badge(&provider), ReliabilityBadge::Gold);
 
-#[test]
-#[should_panic(expected = "Error(Contract, #52)")]
-fn test_oracle_recovery_blocks_new_emergency_actions() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
+    // Second batch: 0/10 online => score drops to 5000 => None
+    for _ in 0..10u32 {
+        client.report_provider_uptime(&provider, &false);
+    }
 
-    let (client, _token, meter_id, member_one) = setup_meter_and_oracle(&env, true);
-    client.register_active_user(&member_one);
-
-    let oracle_addr = client.get_current_rate();
-    assert!(oracle_addr.is_some());
-
-    let oracle_id = env.register_contract(None, MockOracle);
-    let oracle_client = MockOracleClient::new(&env, &oracle_id);
-    client.set_oracle(&oracle_id);
-    oracle_client.set_price(&100, &2, &env.ledger().timestamp());
-
-    client.propose_emergency_pause(&member_one, &meter_id);
-}
-
-#[test]
-fn test_single_member_unanimity_allows_execution() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
-
-    let (client, _token, meter_id, member_one) = setup_meter_and_oracle(&env, true);
-    client.register_active_user(&member_one);
-
-    let proposal_id = client.propose_emergency_flow_rate(&member_one, &meter_id, &4242);
-    client.execute_emergency_action(&member_one, &proposal_id);
-
-    let meter = client.get_meter(&meter_id).unwrap();
-    assert_eq!(meter.max_flow_rate_per_hour, 4242);
+    let score = client.get_reliability_score(&provider).unwrap();
+    assert_eq!(score.windows_total, 20);
+    assert_eq!(score.windows_online, 10);
+    assert_eq!(score.score_bps, 5000);
+    assert_eq!(score.badge, ReliabilityBadge::None);
 }
