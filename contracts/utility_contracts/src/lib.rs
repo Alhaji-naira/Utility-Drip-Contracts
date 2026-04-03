@@ -31,6 +31,8 @@ pub trait VestingVault {
 #[contractclient(name = "NFTMinterClient")]
 pub trait NFTMinter {
     fn mint_receipt_nft(env: Env, to: Address, meter_id: u64, cycle_index: u32);
+    // Task #126: SBT Minting function
+    fn mint_impact_sbt(env: Env, to: Address, carbon_saved: i128, reliability_score: u32);
 }
 
 #[contracttype]
@@ -44,6 +46,9 @@ pub struct PriceData {
 mod debt_fuzz_tests;
 #[cfg(test)]
 mod fuzz_tests;
+#[cfg(test)]
+mod insurance_pool_test;
+mod sbt_minter;
 
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -212,6 +217,14 @@ pub struct BatchWithdrawResult {
     pub total_protocol_fee: i128,
 }
 
+// Task #129: Rebate Distribution Result
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchRebateResult {
+    pub total_meters_processed: u32,
+    pub total_rebate_distributed: i128,
+}
+
 // Task #4: Upgrade Proposal Event
 #[contracttype]
 #[derive(Clone)]
@@ -325,31 +338,15 @@ pub struct SubDaoConfig {
     pub is_active: bool,
 }
 
-// Issue #103: Cryptographic Audit Trail for Institutional Audits (SOX Compliance)
+// ============================================================
+// ISSUE #131: Public Utility Health Index Metrics
+// ============================================================
 #[contracttype]
-#[derive(Clone)]
-pub enum AuditEventType {
-    StreamUpdate,
-    Withdrawal,
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct AuditEvent {
-    pub event_type: AuditEventType,
-    pub meter_id: u64,
-    pub amount: i128,
-    pub timestamp: u64,
-    pub actor: Address,
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct AuditTrailRoot {
-    pub root_hash: BytesN<32>,
-    pub event_count: u64,
-    pub last_update: u64,
-    pub chain_hash: BytesN<32>, // Hash of (previous_root || new_event_hash)
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImpactMetrics {
+    pub total_kilowatts_funded: i128,
+    pub total_liters_streamed: i128,
+    pub active_meters: u32,
 }
 
 #[contracttype]
@@ -417,6 +414,8 @@ pub enum DataKey {
     InsuranceRiskAssessment(Address),
     InsuranceNextProposalId,
     InsuranceNextClaimId,
+    // Task #126: Track SBT issuance
+    ImpactSBTMinted(u64),
 }
 
 #[contracterror]
@@ -485,9 +484,31 @@ pub enum ContractError {
     UnfairPriceIncrease = 50,
     // Issue #109
     BillingGroupNotFound = 51,
-    // Reliability Score
-    NotOracle = 52,
-    ProviderNotFound = 53,
+    // Insurance Pool Errors
+    InsurancePoolNotFound = 52,
+    InsurancePoolAlreadyExists = 53,
+    NotPoolMember = 54,
+    AlreadyPoolMember = 55,
+    InsurancePoolInactive = 56,
+    MemberInactive = 57,
+    ClaimCooldownActive = 58,
+    ClaimAmountTooHigh = 59,
+    ClaimNotFound = 60,
+    ClaimAlreadyProcessed = 61,
+    InsufficientPoolFunds = 62,
+    InsufficientPremium = 63,
+    ProposalNotFound = 64,
+    VotingPeriodExpired = 65,
+    ProposalNotActive = 66,
+    VotingPeriodActive = 67,
+    QuorumNotMet = 68,
+    ProposalRejected = 69,
+    InsufficientVotingPower = 70,
+    InvalidProposalType = 71,
+    NotImplemented = 72,
+    // Task #126: SBT Errors
+    ImpactNotSignificantEnough = 73,
+    SBTAlreadyMinted = 74,
 }
 
 #[contracttype]
@@ -741,7 +762,7 @@ fn convert_usd_to_token_if_needed(
 
 fn get_platform_fee_bps_impl(env: &Env, user: &Address) -> i128 {
     let base_fee: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
-    
+
     // Issue #124: Loyalty-Based Staking Fee Reduction
     if let Some(vault_address) = env.storage().instance().get::<DataKey, Address>(&DataKey::VestingVault) {
         let vault_client = VestingVaultClient::new(env, &vault_address);
@@ -1954,10 +1975,10 @@ impl UtilityContract {
                 if let Some(minter_addr) = env.storage().instance().get::<DataKey, Address>(&DataKey::NFTMinter) {
                     let cycle_index: u32 = env.storage().instance().get(&DataKey::CycleIndex(signed_data.meter_id)).unwrap_or(0);
                     let next_cycle = cycle_index + 1;
-                    
+
                     let minter = NFTMinterClient::new(&env, &minter_addr);
                     minter.mint_receipt_nft(&meter.user, &signed_data.meter_id, &next_cycle);
-                    
+
                     env.storage().instance().set(&DataKey::CycleIndex(signed_data.meter_id), &next_cycle);
                     env.events().publish((symbol_short!("NFTMint"), signed_data.meter_id), next_cycle);
                 }
@@ -2948,9 +2969,7 @@ impl UtilityContract {
     pub fn group_top_up(env: Env, parent_account: Address, amount_per_meter: i128) {
         parent_account.require_auth();
 
-        let billing_group: BillingGroup = env
-            .storage()
-            .instance()
+        let billing_group: BillingGroup = env.storage().instance().get(&DataKey::BillingGroup(parent_account.clone()))
             .get(&DataKey::BillingGroup(parent_account.clone()))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::BillingGroupNotFound));
 
@@ -3002,6 +3021,15 @@ impl UtilityContract {
 
     pub fn remove_meter_from_billing_group(env: Env, parent_account: Address, meter_id: u64) {
         parent_account.require_auth();
+
+        let mut billing_group: BillingGroup = env.storage().instance().get(&DataKey::BillingGroup(parent_account.clone()))
+            .get(&DataKey::BillingGroup(parent_account.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::BillingGroupNotFound));
+
+        billing_group.child_meters.retain(|&id| id != meter_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::BillingGroup(parent_account), &billing_group);
 
         let billing_group: BillingGroup = env
             .storage()
@@ -3229,7 +3257,7 @@ impl UtilityContract {
         if final_claimable > 0 {
             let client = token::Client::new(&env, &meter.token);
             client.transfer(&env.current_contract_address(), &meter.provider, &final_claimable);
-            
+
             meter.balance -= final_claimable;
             meter.claimed_this_hour += final_claimable;
 
@@ -4466,6 +4494,203 @@ impl UtilityContract {
             .instance()
             .get(&DataKey::DebtServiceRecord(meter_id))
     }
+
+    // ============================================================
+    // ISSUE #131: PUBLIC UTILITY HEALTH INDEX API
+    // ============================================================
+
+    /// Publicly queryable endpoint to prove real-world social impact to grantors and foundations.
+    /// Aggregates total energy consumption (Total_Kilowatts_Funded) and total
+    /// value successfully streamed/claimed (representing Total_Liters_of_Water_Streamed).
+    pub fn get_public_utility_health_index(env: Env) -> ImpactMetrics {
+        let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
+
+        let mut total_watt_hours: i128 = 0;
+        let mut total_value_streamed: i128 = 0;
+        let mut active_meters: u32 = 0;
+
+        // Iterate through all registered meters to aggregate global impact
+        for i in 1..=count {
+            if let Some(meter) = env.storage().instance().get::<_, Meter>(&DataKey::Meter(i)) {
+                // 1. Aggregate Energy Usage (Convert watt-hours to Kilowatts later if needed, returning raw for precision)
+                total_watt_hours = total_watt_hours.saturating_add(meter.usage_data.total_watt_hours);
+
+                // 2. Aggregate "Water" (Value successfully delivered/claimed by providers)
+                // In this contract's context, the historical volume delivered is tracked via monthly_volume or provider pools.
+                // We use monthly_volume as a proxy for total historical flow units.
+                total_value_streamed = total_value_streamed.saturating_add(meter.usage_data.monthly_volume);
+
+                // 3. Track active infrastructure
+                if meter.is_active && !meter.is_paused {
+                    active_meters = active_meters.saturating_add(1);
+                }
+            }
+        }
+
+        // Convert watt-hours to kilowatts (divide by 1000) for the public API
+        let total_kilowatts_funded = total_watt_hours / 1000;
+
+        ImpactMetrics {
+            total_kilowatts_funded,
+            total_liters_streamed: total_value_streamed,
+            active_meters,
+        }
+    }
+
+    // ============================================================
+    // ISSUE #129: AUTOMATED UTILITY REBATE DISTRIBUTION LOGIC
+    // ============================================================
+
+    /// Distributes a government or provider subsidy (rebate) back to a batch of active users.
+    /// Calculates a fair proportional share based on each meter's total_watt_hours (contribution volume).
+    pub fn distribute_rebate(
+        env: Env,
+        provider: Address,
+        rebate_token: Address,
+        total_rebate_amount: i128,
+        meter_ids: Vec<u64>,
+    ) -> BatchRebateResult {
+        provider.require_auth();
+
+        if total_rebate_amount <= 0 {
+            panic_with_error!(&env, ContractError::InvalidTokenAmount);
+        }
+        if meter_ids.is_empty() {
+            return BatchRebateResult {
+                total_meters_processed: 0,
+                total_rebate_distributed: 0,
+            };
+        }
+
+        // 1. Calculate the total volume of all eligible meters in this batch
+        let mut total_batch_volume: i128 = 0;
+        let mut eligible_meters: u32 = 0;
+
+        for meter_id in meter_ids.iter() {
+            if let Some(meter) = env.storage().instance().get::<_, Meter>(&DataKey::Meter(meter_id)) {
+                // Ensure meter belongs to the provider, is active, and matches the rebate token
+                if meter.provider == provider && meter.is_active && !meter.is_closed && meter.token == rebate_token {
+                    total_batch_volume = total_batch_volume.saturating_add(meter.usage_data.total_watt_hours);
+                    eligible_meters = eligible_meters.saturating_add(1);
+                }
+            }
+        }
+
+        if total_batch_volume == 0 || eligible_meters == 0 {
+            return BatchRebateResult {
+                total_meters_processed: 0,
+                total_rebate_distributed: 0,
+            };
+        }
+
+        // 2. Transfer the total rebate amount from the provider/government to the smart contract
+        let client = token::Client::new(&env, &rebate_token);
+        client.transfer(&provider, &env.current_contract_address(), &total_rebate_amount);
+
+        // 3. Distribute the rebate proportionally to each meter's balance
+        let mut distributed_total: i128 = 0;
+        let mut meters_processed: u32 = 0;
+        let now = env.ledger().timestamp();
+
+        for meter_id in meter_ids.iter() {
+            if let Some(mut meter) = env.storage().instance().get::<_, Meter>(&DataKey::Meter(meter_id)) {
+                if meter.provider == provider && meter.is_active && !meter.is_closed && meter.token == rebate_token {
+                    let meter_volume = meter.usage_data.total_watt_hours;
+
+                    if meter_volume > 0 {
+                        // Proportional share: (meter_volume * total_rebate) / total_batch_volume
+                        let share = meter_volume.saturating_mul(total_rebate_amount) / total_batch_volume;
+
+                        if share > 0 {
+                            match meter.billing_type {
+                                BillingType::PrePaid => {
+                                    meter.balance = meter.balance.saturating_add(share);
+                                }
+                                BillingType::PostPaid => {
+                                    // Rebate acts as a credit against their debt
+                                    meter.debt = meter.debt.saturating_sub(share);
+                                }
+                            }
+
+                            meter.last_update = now;
+                            refresh_activity(&mut meter, now);
+
+                            env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+                            distributed_total = distributed_total.saturating_add(share);
+                            meters_processed = meters_processed.saturating_add(1);
+
+                            // Emit individual rebate event
+                            env.events().publish(
+                                (symbol_short!("Rebate"), meter_id),
+                                share
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit batch rebate summary event
+        env.events().publish(
+            (symbol_short!("BatchReb"), provider),
+            (rebate_token, total_rebate_amount, distributed_total, meters_processed)
+        );
+
+        BatchRebateResult {
+            total_meters_processed: meters_processed,
+            total_rebate_distributed: distributed_total,
+        }
+    }
+    // ============================================================
+        // ISSUE #126: UTILITY IMPACT CREDENTIAL MINTER (SBT)
+        // ============================================================
+
+        /// Allows a user to claim their Green Energy Soulbound Token once they hit
+        /// a 5-year equivalent usage milestone. Fetches their SoroSusu score for metadata.
+        pub fn claim_impact_sbt(env: Env, meter_id: u64) {
+            let meter = get_meter_or_panic(&env, meter_id);
+            meter.user.require_auth();
+
+            // 1. Check if they already claimed their permanent credential
+            if env.storage().instance().get(&DataKey::ImpactSBTMinted(meter_id)).unwrap_or(false) {
+                panic_with_error!(&env, ContractError::SBTAlreadyMinted);
+            }
+
+            // 2. Define the 5-Year Threshold
+            // Example: 10 kWh/day * 365 days * 5 years = 18,250,000 Watt-hours
+            const SBT_GREEN_ENERGY_THRESHOLD: i128 = 18_250_000;
+
+            if meter.usage_data.renewable_watt_hours < SBT_GREEN_ENERGY_THRESHOLD {
+                panic_with_error!(&env, ContractError::ImpactNotSignificantEnough);
+            }
+
+            // 3. Calculate "Carbon Saved"
+            // Simplified metric: 1 Watt-hour of green energy saves ~0.4 grams of CO2
+            let carbon_saved_grams = meter.usage_data.renewable_watt_hours.saturating_mul(4) / 10;
+
+            // 4. Fetch Reliability Score from the SoroSusu Contract
+            let sorosusu_contract = get_sorosusu_contract(&env);
+            let susu_client = SoroSusuClient::new(&env, &sorosusu_contract);
+            let reliability_score = susu_client.get_susu_score(meter.user.clone());
+
+            // 5. Trigger the external NFT/SBT Minter
+            if let Some(minter_addr) = env.storage().instance().get::<DataKey, Address>(&DataKey::NFTMinter) {
+                let minter = NFTMinterClient::new(&env, &minter_addr);
+
+                // Mint the Soulbound Token
+                minter.mint_impact_sbt(&meter.user, &carbon_saved_grams, &reliability_score);
+
+                // Lock it so it can never be minted again for this meter
+                env.storage().instance().set(&DataKey::ImpactSBTMinted(meter_id), &true);
+
+                env.events().publish(
+                    (soroban_sdk::symbol_short!("SBTMint"), meter_id),
+                    (carbon_saved_grams, reliability_score)
+                );
+            } else {
+                panic_with_error!(&env, ContractError::NotImplemented);
+            }
+        }
 }
 
 fn verify_usage_signature(
@@ -4503,5 +4728,4 @@ fn verify_usage_signature(
     );
     Ok(())
 }
-
 mod test;
