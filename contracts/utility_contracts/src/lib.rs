@@ -1,11 +1,11 @@
 #![no_std]
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
-    symbol_short, token, Address, Bytes, BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, Env, BytesN, Vec, Symbol,
 };
 
-// --- Constants ---
+// --- Constants (Merged) ---
 const DEFAULT_BUFFER_DAYS: i128 = 3;
 const TRUSTED_BUFFER_DAYS: i128 = 1;
 const MINIMUM_BALANCE_TO_FLOW: i128 = 500;
@@ -13,57 +13,25 @@ const HOUR_IN_SECONDS: u64 = 60 * 60;
 const DAY_IN_SECONDS: u64 = 24 * HOUR_IN_SECONDS;
 const GRACE_PERIOD_SECONDS: u64 = 86_400;
 const DEBT_THRESHOLD: i128 = -10_000_000;
-const DAILY_WITHDRAWAL_PERCENT: i128 = 10;
 const MAX_USAGE_PER_UPDATE: i128 = 1_000_000_000_000i128;
 const MAX_TIMESTAMP_DELAY: u64 = 300;
 const PEAK_HOUR_START: u64 = 18 * HOUR_IN_SECONDS;
 const PEAK_HOUR_END: u64 = 21 * HOUR_IN_SECONDS;
-const PEAK_RATE_MULTIPLIER: i128 = 3;
+const PEAK_RATE_MULTIPLIER: i128 = 3; 
 const RATE_PRECISION: i128 = 2;
-const REFERRAL_REWARD_UNITS: i128 = 500;
 const XLM_PRECISION: i128 = 10_000_000;
-const XLM_MINIMUM_INCREMENT: i128 = 1;
-const XLM_GAS_RESERVE: i128 = 5 * XLM_PRECISION;
-const MAX_RESELLER_FEE_BPS: i128 = 2000;
-const DEBT_SERVICE_DIVERT_BPS: i128 = 500;
 const DEFAULT_TAX_RATE_BPS: i128 = 500;
 const MAINTENANCE_FUND_PERCENT_BPS: i128 = 1;
 const LEDGER_LIFETIME_EXTENSION: u32 = 1_000_000;
-
-// --- External Contract Clients ---
-#[contractclient(name = "PriceOracleClient")]
-pub trait PriceOracle {
-    fn get_price(env: Env) -> PriceData;
-}
-
-#[contractclient(name = "SoroSusuClient")]
-pub trait SoroSusu {
-    fn get_susu_score(env: Env, user: Address) -> u32;
-    fn is_trusted_saver(env: Env, user: Address) -> bool;
-    fn is_in_default(env: Env, user: Address) -> bool;
-    fn record_debt_payment(env: Env, user: Address, amount: i128);
-}
-
-#[contractclient(name = "VestingVaultClient")]
-pub trait VestingVault {
-    fn get_staked_balance(env: Env, user: Address) -> i128;
-}
-
-#[contractclient(name = "NFTMinterClient")]
-pub trait NFTMinter {
-    fn mint_receipt_nft(env: Env, to: Address, meter_id: u64, cycle_index: u32);
-    fn mint_impact_sbt(env: Env, to: Address, carbon_saved: i128, reliability_score: u32);
-}
+const AUTO_EXTEND_LEDGER_THRESHOLD: u32 = 500_000;
+const UPGRADE_VETO_PERIOD_SECONDS: u64 = 7 * DAY_IN_SECONDS;
+const ADMIN_TRANSFER_TIMELOCK: u64 = 48 * HOUR_IN_SECONDS;
+const VETO_THRESHOLD_BPS: i128 = 1000;
+const WITHDRAWAL_REQUEST_EXPIRY: u64 = 7 * DAY_IN_SECONDS;
+const MIN_FINANCE_WALLETS: usize = 3;
+const MAX_FINANCE_WALLETS: usize = 5;
 
 // --- Data Structures ---
-
-#[contracttype]
-#[derive(Clone)]
-pub struct PriceData {
-    pub price: i128,
-    pub decimals: u32,
-    pub last_updated: u64,
-}
 
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -86,6 +54,15 @@ pub struct UsageData {
 mod gas_estimator;
 use gas_estimator::GasCostEstimator;
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SavingGoal {
+    pub target_amount: i128,
+    pub current_savings: i128,
+    pub marketplace: Address,
+    pub is_completed: bool,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub struct Meter {
     pub user: Address,
@@ -96,84 +73,17 @@ pub struct Meter {
     pub rate_per_unit: i128,
     pub balance: i128,
     pub debt: i128,
-    pub collateral_limit: i128,
     pub last_update: u64,
     pub is_active: bool,
     pub token: Address,
     pub usage_data: UsageData,
-    pub max_flow_rate_per_hour: i128,
-    pub last_claim_time: u64,
-    pub claimed_this_hour: i128,
-    pub heartbeat: u64,
     pub device_public_key: BytesN<32>,
-    pub is_paired: bool,
-    pub grace_period_start: u64,
-    pub is_paused: bool,
-    pub tier_threshold: i128,
-    pub tier_rate: i128,
-    pub is_disputed: bool,
-    pub challenge_timestamp: u64,
-    pub credit_drip_rate: i128,
-    pub is_closed: bool,
+    pub end_date: u64,
+    pub rent_deposit: i128,
     pub priority_index: u32,
-    pub off_peak_reward_rate_bps: i128,
-    pub milestone_deadline: u64,
-    pub milestone_confirmed: bool,
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct ClaimSettlement {
-    pub gross_claimed: i128,
-    pub provider_payout: i128,
-    pub tax_amount: i128,
-    pub protocol_fee: i128,
-    pub reseller_payout: i128,
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct ResellerConfig {
-    pub reseller: Address,
-    pub fee_bps: i128,
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct ImpactMetrics {
-    pub total_kilowatts_funded: i128,
-    pub total_liters_streamed: i128,
-    pub active_meters: u32,
-}
-
-// Issue #98: Multi-Sig Provider Withdrawal Requirement
-// For large utility companies, withdrawals require 3-of-5 authorized signatures
-// from Finance Department wallets to prevent unauthorized access to streaming revenue
-#[contracttype]
-#[derive(Clone)]
-pub struct MultiSigConfig {
-    pub provider: Address,              // The utility provider this config belongs to
-    pub finance_wallets: Vec<Address>,  // List of authorized Finance Department wallets (max 5)
-    pub required_signatures: u32,       // Number of signatures required (typically 3)
-    pub threshold_amount: i128,         // Minimum amount requiring multi-sig (in USD cents)
-    pub is_active: bool,                // Whether multi-sig is enabled
-    pub created_at: u64,                // Timestamp when config was created
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct WithdrawalRequest {
-    pub request_id: u64,                // Unique request identifier
-    pub provider: Address,              // Provider requesting withdrawal
-    pub meter_id: u64,                  // Meter to withdraw from
-    pub amount_usd_cents: i128,         // Amount requested in USD cents
-    pub destination: Address,           // Destination treasury address
-    pub proposer: Address,              // Finance wallet that proposed this request
-    pub created_at: u64,                // Timestamp when request was created
-    pub expires_at: u64,                // Request expiration timestamp
-    pub approval_count: u32,            // Current number of approvals
-    pub is_executed: bool,              // Whether withdrawal has been executed
-    pub is_cancelled: bool,             // Whether request was cancelled
+    pub green_energy_discount_bps: i128,
+    pub is_paused: bool,
+    pub is_disputed: bool,
 }
 
 #[contracttype]
@@ -181,10 +91,13 @@ pub enum DataKey {
     Meter(u64),
     Count,
     Oracle,
-    SoroSusuContract,
-    VestingVault,
-    NFTMinter,
-    MaintenanceWallet,
+    ActiveMetersCount,
+    SeasonalFactor,
+    Treasury,
+    ProviderVolume(Address),
+    SavingGoal(u64),
+    NativeToken,
+    TaxRateBps,
     ProtocolFeeBps,
     SupportedToken(Address),
     SupportedWithdrawalToken(Address),
@@ -330,345 +243,65 @@ pub struct PairingChallengeData {
     pub timestamp: u64,
 }
 
-#[contract]
-pub struct UtilityContract;
+// --- Internal Helpers ---
 
-const HOUR_IN_SECONDS: u64 = 60 * 60;
-const DAY_IN_SECONDS: u64 = 24 * HOUR_IN_SECONDS;
-const GRACE_PERIOD_SECONDS: u64 = 86_400; // 24 hours grace period
-const DEBT_THRESHOLD: i128 = -10_000_000; // -10 XLM (in stroops) threshold for negative balance
-const DAILY_WITHDRAWAL_PERCENT: i128 = 10;
-const MAX_USAGE_PER_UPDATE: i128 = 1_000_000_000_000i128; // 1 billion kWh max per update
-const MIN_PRECISION_FACTOR: i128 = 1;
-const MAX_TIMESTAMP_DELAY: u64 = 300; // 5 minutes
+fn get_seasonal_multiplier(env: &Env) -> i128 {
+    env.storage().instance().get(&DataKey::SeasonalFactor).unwrap_or(100)
+}
 
-// NEW TASK CONSTANTS:
-// Task #1: Admin Transfer Timelock
-const ADMIN_TRANSFER_TIMELOCK: u64 = 48 * HOUR_IN_SECONDS; // 48 hours
-const VETO_THRESHOLD_BPS: i128 = 1000; // 10% in basis points
+fn is_peak_hour(timestamp: u64) -> bool {
+    let day_seconds = timestamp % DAY_IN_SECONDS;
+    day_seconds >= PEAK_HOUR_START && day_seconds <= PEAK_HOUR_END
+}
 
-// Task #2: Legal Freeze
-const LEGAL_FREEZE_DURATION: u64 = 30 * DAY_IN_SECONDS; // 30 days default
-
-// Peak hours: 18:00 - 21:00 UTC
-const PEAK_HOUR_START: u64 = 18 * HOUR_IN_SECONDS; // 64800 seconds
-const PEAK_HOUR_END: u64 = 21 * HOUR_IN_SECONDS; // 75600 seconds
-const PEAK_RATE_MULTIPLIER: i128 = 3; // 1.5x => stored as 3 (divide by 2)
-const RATE_PRECISION: i128 = 2; // Precision for rate calculations
-const REFERRAL_REWARD_UNITS: i128 = 500; // 5 units reward for referrals
-
-// XLM precision constants - XLM has 7 decimal places (0.0000001 minimum)
-const XLM_PRECISION: i128 = 10_000_000; // 10^7 for 7 decimal places
-const XLM_MINIMUM_INCREMENT: i128 = 1; // 1 stroop = 0.0000001 XLM
-
-// Task #1: Priority System Constants
-const THROTTLING_THRESHOLD_PERCENT: i128 = 20; // 20% of total balance triggers throttling
-const LOW_PRIORITY_THRESHOLD: u32 = 5; // Streams with priority >= 5 are considered low priority
-
-// Task #2: Tax Compliance Constants
-const DEFAULT_TAX_RATE_BPS: i128 = 500; // 5% tax (500 basis points)
-
-// Task #3: Self-Maintenance Constants
-const MAINTENANCE_FUND_PERCENT_BPS: i128 = 1; // 0.01% = 1 basis point
-const AUTO_EXTEND_LEDGER_THRESHOLD: u32 = 500_000; // Extend TTL every 500,000 ledgers
-const LEDGER_LIFETIME_EXTENSION: u32 = 1_000_000; // Extend by 1M ledgers
-
-// Task #4: Wasm Hash Rotation Constants
-const UPGRADE_VETO_PERIOD_SECONDS: u64 = 7 * DAY_IN_SECONDS; // 7 days veto period
-
-// Issue #98: Multi-Sig Provider Withdrawal Constants
-const MAX_FINANCE_WALLETS: u32 = 5;        // Maximum number of authorized finance wallets
-const MIN_FINANCE_WALLETS: u32 = 3;        // Minimum number of finance wallets required
-const DEFAULT_REQUIRED_SIGNATURES: u32 = 3; // Default 3-of-5 requirement
-const WITHDRAWAL_REQUEST_EXPIRY: u64 = 7 * DAY_IN_SECONDS; // Requests expire after 7 days
-const DEFAULT_MULTISIG_THRESHOLD: i128 = 100_000_00; // $100,000 USD in cents
-
-/// Round XLM amount to nearest minimum increment (0.0000001 XLM)
-/// This prevents value loss over time due to truncation
-fn round_xlm_to_minimum_increment(amount: i128) -> i128 {
-    // For positive amounts, round up on .5 or higher
-    // For negative amounts, round down on -.5 or lower
-    if amount >= 0 {
-        ((amount + XLM_MINIMUM_INCREMENT / 2) / XLM_MINIMUM_INCREMENT) * XLM_MINIMUM_INCREMENT
+fn get_effective_rate(env: &Env, meter: &Meter, timestamp: u64) -> i128 {
+    let base_rate = if is_peak_hour(timestamp) {
+        meter.peak_rate
     } else {
-        ((amount - XLM_MINIMUM_INCREMENT / 2) / XLM_MINIMUM_INCREMENT) * XLM_MINIMUM_INCREMENT
-    }
-}
-
-/// Convert USD cents to XLM with proper rounding to minimum increment
-fn convert_usd_cents_to_xlm_with_rounding(usd_cents: i128, xlm_price_cents: i128) -> i128 {
-    if xlm_price_cents <= 0 {
-        return 0;
-    }
-
-    // Calculate raw XLM amount with higher precision
-    let raw_xlm = usd_cents.saturating_mul(XLM_PRECISION) / xlm_price_cents;
-
-    // Round to nearest minimum increment to prevent value loss
-    round_xlm_to_minimum_increment(raw_xlm)
-}
-
-/// Convert XLM to USD cents with proper rounding
-fn convert_xlm_to_usd_cents_with_rounding(xlm_amount: i128, xlm_price_cents: i128) -> i128 {
-    if xlm_price_cents <= 0 {
-        return 0;
-    }
-
-    // Calculate USD cents, rounding to nearest cent
-    let raw_usd = xlm_amount.saturating_mul(xlm_price_cents) / XLM_PRECISION;
-
-    // Round to nearest cent
-    if raw_usd >= 0 {
-        ((raw_usd + 50) / 100) * 100 // Round up on .5 or higher
-    } else {
-        ((raw_usd - 50) / 100) * 100 // Round down on -.5 or lower
-    }
-
-    pub fn claim(env: Env, meter_id: u64) {
-        let mut meter = get_meter_or_panic(&env, meter_id);
-        meter.provider.require_auth();
-
-        if meter.is_disputed { panic_with_error!(&env, ContractError::InDispute); }
-
-        let old_meter_value = provider_meter_value(&meter);
-        let now = env.ledger().timestamp();
-        let mut window = get_provider_window_or_default(&env, &meter.provider, now);
-        
-        let settlement = settle_claim_for_meter(&env, meter_id, &mut meter, now, &mut window);
-        let client = token::Client::new(&env, &meter.token);
-
-        // 1. Pay Government Tax
-        if settlement.tax_amount > 0 {
-            if let Some(gov_vault) = env.storage().instance().get::<_, Address>(&DataKey::GovernmentVault) {
-                client.transfer(&env.current_contract_address(), &gov_vault, &settlement.tax_amount);
-            }
-        }
-
-        // 2. Pay Protocol Maintenance Fee
-        if settlement.protocol_fee > 0 {
-            if let Some(wallet) = env.storage().instance().get::<_, Address>(&DataKey::MaintenanceWallet) {
-                client.transfer(&env.current_contract_address(), &wallet, &settlement.protocol_fee);
-            }
-        }
-
-fn convert_usd_to_token_if_needed(env: &Env, usd_cents: i128, destination_token: &Address) -> Result<i128, ContractError> {
-    // For now, we assume the oracle can provide conversion rates for any token
-    // In a real implementation, you'd need specific price feeds for each token
-    match env.storage().instance().get::<DataKey, Address>(&DataKey::Oracle) {
-        Some(oracle_address) => {
-            let oracle_client = PriceOracleClient::new(env, &oracle_address);
-            let price_data = oracle_client.get_price();
-
-            // If destination is XLM (native token), use existing conversion
-            if is_native_token(destination_token) {
-                let xlm_amount = convert_usd_cents_to_xlm_with_rounding(usd_cents, price_data.price);
-                Ok(xlm_amount)
-            } else {
-                // For other tokens, assume 1:1 with USD for now
-                // In production, you'd need specific price feeds for each token
-                Ok(usd_cents)
-            }
-        }
-
-        // 4. Pay Provider
-        if settlement.provider_payout > 0 {
-            client.transfer(&env.current_contract_address(), &meter.provider, &settlement.provider_payout);
-        }
-
-        // Update State
-        env.storage().instance().set(&DataKey::ProviderWindow(meter.provider.clone()), &window);
-        update_provider_total_pool(&env, &meter.provider, old_meter_value, provider_meter_value(&meter));
-        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
-    }
-
-    pub fn assign_reseller(env: Env, meter_id: u64, reseller: Address, fee_bps: i128) {
-        let meter = get_meter_or_panic(&env, meter_id);
-        meter.provider.require_auth();
-        if fee_bps > MAX_RESELLER_FEE_BPS { panic_with_error!(&env, ContractError::InvalidResellerFee); }
-
-        let config = ResellerConfig { reseller: reseller.clone(), fee_bps };
-        env.storage().instance().set(&DataKey::ResellerConfig(meter_id), &config);
-        env.events().publish((symbol_short!("RslrSet"), meter_id), (reseller, fee_bps));
-    }
-
-    pub fn claim_impact_sbt(env: Env, meter_id: u64) {
-        let meter = get_meter_or_panic(&env, meter_id);
-        meter.user.require_auth();
-
-        if env.storage().instance().get(&DataKey::ImpactSBTMinted(meter_id)).unwrap_or(false) {
-            panic_with_error!(&env, ContractError::SBTAlreadyMinted);
-        }
-
-        const SBT_THRESHOLD: i128 = 18_250_000;
-        if meter.usage_data.renewable_watt_hours < SBT_THRESHOLD {
-            panic_with_error!(&env, ContractError::ImpactNotSignificantEnough);
-        }
-
-        let carbon_saved = meter.usage_data.renewable_watt_hours.saturating_mul(4) / 10;
-        let susu_addr = env.storage().instance().get::<_, Address>(&DataKey::SoroSusuContract).expect("No Susu");
-        let susu_client = SoroSusuClient::new(&env, &susu_addr);
-        let score = susu_client.get_susu_score(meter.user.clone());
-
-        if let Some(minter_addr) = env.storage().instance().get::<_, Address>(&DataKey::NFTMinter) {
-            let minter = NFTMinterClient::new(&env, &minter_addr);
-            minter.mint_impact_sbt(&meter.user, &carbon_saved, &score);
-            env.storage().instance().set(&DataKey::ImpactSBTMinted(meter_id), &true);
-        }
-    }
-
-    pub fn get_public_utility_health_index(env: Env) -> ImpactMetrics {
-        let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
-        let mut total_wh: i128 = 0;
-        let mut total_val: i128 = 0;
-        let mut active: u32 = 0;
-
-        for i in 1..=count {
-            if let Some(meter) = env.storage().instance().get::<_, Meter>(&DataKey::Meter(i)) {
-                total_wh += meter.usage_data.total_watt_hours;
-                total_val += meter.usage_data.monthly_volume;
-                if meter.is_active && !meter.is_paused { active += 1; }
-            }
-        }
-        ImpactMetrics { total_kilowatts_funded: total_wh / 1000, total_liters_streamed: total_val, active_meters: active }
-    }
-}
-
-// --- Internal Settlement Logic ---
-
-fn settle_claim_for_meter(
-    env: &Env,
-    meter_id: u64,
-    meter: &mut Meter,
-    now: u64,
-    provider_window: &mut ProviderWithdrawalWindow,
-) -> ClaimSettlement {
-    let elapsed = now.saturating_sub(meter.last_update);
-    let mut amount = (elapsed as i128).saturating_mul(meter.rate_per_unit);
+        meter.off_peak_rate
+    };
     
-    // Issue #106: Milestone Penalty (Halve rate if deadline missed)
-    if meter.milestone_deadline > 0 && now > meter.milestone_deadline && !meter.milestone_confirmed {
-        amount /= 2;
-    }
-
-    let claimable = if amount > meter.balance && meter.balance - amount >= DEBT_THRESHOLD {
-        amount
-    } else if amount > meter.balance {
-        meter.balance - DEBT_THRESHOLD
-    } else {
-        amount
-    };
-
-    if claimable <= 0 {
-        return ClaimSettlement { gross_claimed: 0, provider_payout: 0, tax_amount: 0, protocol_fee: 0, reseller_payout: 0 };
-    }
-
-    // 1. Tax Calculation
-    let tax_rate = env.storage().instance().get(&DataKey::TaxRateBps).unwrap_or(DEFAULT_TAX_RATE_BPS);
-    let tax_amt = (claimable * tax_rate) / 10000;
-    let after_tax = claimable - tax_amt;
-
-    // 2. Protocol Fee
-    let protocol_bps: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
-    let protocol_fee = (after_tax * protocol_bps) / 10000;
-    let after_protocol = after_tax - protocol_fee;
-
-    // 3. Reseller Split
-    let reseller_payout = get_reseller_cut(env, meter_id, after_protocol);
-    let provider_payout = after_protocol - reseller_payout;
-
-    meter.balance -= claimable;
-    meter.last_update = now;
-
-    ClaimSettlement {
-        gross_claimed: claimable,
-        provider_payout,
-        tax_amount: tax_amt,
-        protocol_fee,
-        reseller_payout,
-    }
-
-    // Calculate total value (balance + debt if postpaid)
-    let total_value = match meter.billing_type {
-        BillingType::PrePaid => meter.balance,
-        BillingType::PostPaid => meter.balance.saturating_sub(meter.debt),
-    };
-
-    if total_value <= 0 {
-        return false;
-    }
-
-    // If balance is less than 20% of total value, trigger throttling
-    let threshold = (total_value * THROTTLING_THRESHOLD_PERCENT) / 100;
-    meter.balance < threshold
+    let multiplier = get_seasonal_multiplier(env);
+    base_rate.saturating_mul(multiplier) / 100
 }
 
-fn should_pause_low_priority_stream(meter: &Meter, throttling_active: bool) -> bool {
-    // Only pause if throttling is active AND this is a low priority stream
-    throttling_active && meter.priority_index >= LOW_PRIORITY_THRESHOLD
-}
+fn apply_provider_claim(env: &Env, meter: &mut Meter, meter_id: u64, amount: i128) {
+    if amount <= 0 { return; }
 
-// --- Helpers ---
+    let mut provider_share = amount;
+    
+    // 1. Savings Goal Redirection (20%)
+    if let Some(mut goal) = env.storage().instance().get::<DataKey, SavingGoal>(&DataKey::SavingGoal(meter_id)) {
+        if !goal.is_completed {
+            let contribution = amount / 5; 
+            goal.current_savings = goal.current_savings.saturating_add(contribution);
+            provider_share = provider_share.saturating_sub(contribution);
 
-fn get_meter_or_panic(env: &Env, id: u64) -> Meter {
-    env.storage().instance().get(&DataKey::Meter(id)).expect("Meter Not Found")
-}
-
-fn provider_meter_value(meter: &Meter) -> i128 {
-    meter.balance.max(DEBT_THRESHOLD)
-}
-
-// Task #3: Self-Maintenance Helper Functions
-fn allocate_to_maintenance_fund(env: &Env, meter_id: u64, amount: i128) {
-    let maintenance_amount = (amount * MAINTENANCE_FUND_PERCENT_BPS) / 10_000;
-
-    if maintenance_amount > 0 {
-        let current_fund: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaintenanceFund(meter_id))
-            .unwrap_or(0);
-
-        let new_fund = current_fund.saturating_add(maintenance_amount);
-        env.storage()
-            .instance()
-            .set(&DataKey::MaintenanceFund(meter_id), &new_fund);
-    }
-}
-
-fn get_reseller_config_impl(env: &Env, meter_id: u64) -> Option<ResellerConfig> {
-    env.storage().instance().get(&DataKey::ResellerConfig(meter_id))
-}
-
-fn auto_extend_ttl_if_needed(env: &Env, meter_id: u64) {
-    let ledger_sequence = env.ledger().sequence();
-    let threshold: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::AutoExtendThreshold)
-        .unwrap_or(AUTO_EXTEND_LEDGER_THRESHOLD);
-
-    // Check if we need to extend (every 500,000 ledgers)
-    if ledger_sequence % threshold as u32 == 0 {
-        let maintenance_balance = get_maintenance_fund_balance(env, meter_id);
-
-        // Estimate cost of TTL extension (simplified - actual cost depends on storage size)
-        let estimated_cost = 1_000_000; // 1 XLM in stroops as example
-
-        if maintenance_balance >= estimated_cost {
-            // Deduct from maintenance fund
-            let new_balance = maintenance_balance.saturating_sub(estimated_cost);
-            env.storage()
-                .instance()
-                .set(&DataKey::MaintenanceFund(meter_id), &new_balance);
-
-            // Extend TTL - this extends the contract's storage TTL
-            env.storage().instance().extend_ttl(LEDGER_LIFETIME_EXTENSION, LEDGER_LIFETIME_EXTENSION);
-
-            env.events().publish(
-                (soroban_sdk::symbol_short!("TTLExtnd"), meter_id),
-                (ledger_sequence, LEDGER_LIFETIME_EXTENSION),
-            );
+            if goal.current_savings >= goal.target_amount {
+                goal.is_completed = true;
+                env.events().publish((symbol_short!("AutoBuy"), meter.user.clone()), (goal.marketplace.clone(), goal.target_amount));
+            }
+            env.storage().instance().set(&DataKey::SavingGoal(meter_id), &goal);
         }
+    }
+
+    // 2. Sustainability / Protocol Fee (0.1% if vol > $100k)
+    let mut provider_vol = env.storage().instance().get::<DataKey, i128>(&DataKey::ProviderVolume(meter.provider.clone())).unwrap_or(0);
+    if provider_vol >= 10_000_000 {
+        let fee = provider_share / 1000;
+        if fee > 0 {
+            if let Some(treasury) = env.storage().instance().get::<DataKey, Address>(&DataKey::Treasury) {
+                let client = token::Client::new(env, &meter.token);
+                client.transfer(&env.current_contract_address(), &treasury, &fee);
+                provider_share = provider_share.saturating_sub(fee);
+            }
+        }
+    }
+
+    // 3. Payout to Provider
+    if provider_share > 0 {
+        let client = token::Client::new(env, &meter.token);
+        client.transfer(&env.current_contract_address(), &meter.provider, &provider_share);
     }
 }
 
@@ -719,82 +352,17 @@ fn can_finalize_upgrade(env: &Env) -> bool {
     let deadline: u64 = env.storage().instance().get(&DataKey::VetoDeadline).unwrap_or(0);
     let now = env.ledger().timestamp();
 
-    if now < deadline {
-        return false; // Veto period still active
+    match meter.billing_type {
+        BillingType::PrePaid => meter.balance = meter.balance.saturating_sub(amount),
+        BillingType::PostPaid => meter.debt = meter.debt.saturating_add(amount),
     }
-
-    // Check if any user vetoed (simplified - in production would count vetoes)
-    // For now, we assume if no explicit veto recorded, upgrade can proceed
-
-    true
 }
 
-fn update_provider_total_pool(env: &Env, provider: &Address, old: i128, new: i128) {
-    // Pool update logic
-}
-
-fn publish_inactive_event(env: &Env, meter_id: u64, now: u64) {
-    env.events()
-        .publish((symbol_short!("Inactive"), meter_id), now);
-}
+#[contract]
+pub struct UtilityContract;
 
 #[contractimpl]
 impl UtilityContract {
-    pub fn get_minimum_balance_to_flow() -> i128 {
-        MINIMUM_BALANCE_TO_FLOW
-    }
-
-    pub fn set_oracle(env: Env, oracle_address: Address) {
-        // This should be called by admin to set the oracle address
-        env.storage()
-            .instance()
-            .set(&DataKey::Oracle, &oracle_address);
-    }
-
-    pub fn set_maintenance_config(env: Env, wallet: Address, fee_bps: i128) {
-        env.storage()
-            .instance()
-            .set(&DataKey::MaintenanceWallet, &wallet);
-        env.storage()
-            .instance()
-            .set(&DataKey::ProtocolFeeBps, &fee_bps);
-    }
-
-    pub fn add_supported_token(env: Env, token: Address) {
-        env.storage()
-            .instance()
-            .set(&DataKey::SupportedToken(token), &true);
-    }
-
-    pub fn remove_supported_token(env: Env, token: Address) {
-        env.storage()
-            .instance()
-            .set(&DataKey::SupportedToken(token), &false);
-    }
-
-    /// Add a supported withdrawal token for path payments
-    pub fn add_supported_withdrawal_token(env: Env, token: Address) {
-        env.storage().instance().set(&DataKey::SupportedWithdrawalToken(token), &true);
-    }
-
-    /// Remove a supported withdrawal token for path payments
-    pub fn remove_supported_withdrawal_token(env: Env, token: Address) {
-        env.storage().instance().set(&DataKey::SupportedWithdrawalToken(token), &false);
-    }
-
-    /// Set green energy discount for a specific meter (in basis points)
-    pub fn set_green_energy_discount(env: Env, meter_id: u64, discount_bps: i128) {
-        let mut meter = get_meter_or_panic(&env, meter_id);
-        meter.provider.require_auth();
-
-        if discount_bps < 0 || discount_bps > 10000 {
-            panic_with_error!(&env, ContractError::InvalidUsageValue);
-        }
-
-        meter.green_energy_discount_bps = discount_bps;
-        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
-    }
-
     pub fn register_meter(
         env: Env,
         user: Address,
@@ -868,92 +436,62 @@ impl UtilityContract {
         priority_index: u32,
     ) -> u64 {
         user.require_auth();
-
-        let mut count = env
-            .storage()
-            .instance()
-            .get::<DataKey, u64>(&DataKey::Count)
-            .unwrap_or(0);
+        
+        let mut count = env.storage().instance().get::<DataKey, u64>(&DataKey::Count).unwrap_or(0);
         count += 1;
+
+        let mut active_count = env.storage().instance().get::<_, u32>(&DataKey::ActiveMetersCount).unwrap_or(0);
+        active_count += 1;
 
         let now = env.ledger().timestamp();
         let peak_rate = off_peak_rate.saturating_mul(PEAK_RATE_MULTIPLIER) / RATE_PRECISION;
 
-        let usage_data = UsageData {
-            total_watt_hours: 0,
-            current_cycle_watt_hours: 0,
-            peak_usage_watt_hours: 0,
-            last_reading_timestamp: now,
-            precision_factor: 1,
-            renewable_watt_hours: 0,
-            renewable_percentage: 0,
-            monthly_volume: 0,
-            last_volume_reset: now,
-        };
-
         let meter = Meter {
-            user: user.clone(),
-            provider: provider.clone(),
-            billing_type,
+            user,
+            provider,
+            billing_type: BillingType::PrePaid,
             off_peak_rate,
             peak_rate,
-            rate_per_second: 0, // Deprecated, kept for backwards compatibility
             rate_per_unit: off_peak_rate,
-            green_energy_discount_bps: 0,
             balance: 0,
             debt: 0,
-            collateral_limit: 0,
             last_update: now,
             is_active: true,
             token,
-            usage_data,
-            max_flow_rate_per_hour: 0,
-            last_claim_time: 0,
-            claimed_this_hour: 0,
-            heartbeat: now,
+            usage_data: UsageData {
+                total_watt_hours: 0,
+                current_cycle_watt_hours: 0,
+                peak_usage_watt_hours: 0,
+                last_reading_timestamp: now,
+                precision_factor: 1,
+                renewable_watt_hours: 0,
+                renewable_percentage: 0,
+                monthly_volume: 0,
+                last_volume_reset: now,
+            },
             device_public_key,
-            is_paired: false,
-            grace_period_start: 0,
+            end_date,
+            rent_deposit,
+            priority_index,
+            green_energy_discount_bps: 0,
             is_paused: false,
-            tier_threshold: 0,
-            tier_rate: 0,
             is_disputed: false,
-            challenge_timestamp: 0,
-            credit_drip_rate: 0,
-            is_closed: false,
-            priority_index, // Task #1: Set priority index
         };
 
         env.storage().instance().set(&DataKey::Meter(count), &meter);
         env.storage().instance().set(&DataKey::Count, &count);
-
-        // Initialize provider total pool (new meter starts with 0 value)
-        let current_pool = get_provider_total_pool_impl(&env, &provider);
-        env.storage()
-            .instance()
-            .set(&DataKey::ProviderTotalPool(provider), &current_pool);
-
         count
     }
 
-    pub fn batch_register_meters(env: Env, meter_infos: Vec<MeterInfo>) -> BatchCreatedEvent {
-        if meter_infos.is_empty() {
-            panic_with_error!(&env, ContractError::InvalidTokenAmount);
-        }
+    pub fn deduct_units_signed(env: Env, signed_data: SignedUsageData) {
+        let mut meter = env.storage().instance().get::<DataKey, Meter>(&DataKey::Meter(signed_data.meter_id)).unwrap();
+        meter.provider.require_auth();
 
-        // Require authorization for all users in the batch
-        for meter_info in meter_infos.iter() {
-            meter_info.user.require_auth();
-        }
+        // Security Checks
+        if meter.is_disputed || meter.is_paused { panic_with_error!(&env, ContractError::InDispute); }
 
-        let mut count = env
-            .storage()
-            .instance()
-            .get::<DataKey, u64>(&DataKey::Count)
-            .unwrap_or(0);
-
-        let start_id = count + 1;
         let now = env.ledger().timestamp();
+        let effective_rate = get_effective_rate(&env, &meter, now);
 
         // Track providers initialized to avoid duplicate initialization
         let mut providers_initialized: Vec<Address> = Vec::new(&env);
@@ -2214,7 +1752,6 @@ impl UtilityContract {
     }
 
     // Gas Cost Estimator Functions
-<<<<<<< HEAD
     pub fn estimate_meter_monthly_cost(
         env: Env,
         is_group_meter: bool,
@@ -3130,7 +2667,6 @@ env.storage()
             is_active: true,
         };
 
-<<<<<<< HEAD
         env.storage()
             .instance()
             .set(&DataKey::SubDaoConfig(sub_dao.clone()), &config);
