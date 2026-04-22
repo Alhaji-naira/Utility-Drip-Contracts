@@ -599,6 +599,15 @@ fn test_batch_register_meters_empty_vector() {
     let env = Env::default();
     let contract_address = env.register_contract(None, UtilityContract);
     let client = UtilityContractClient::new(&env, &contract_address);
+    
+    // Test with empty vector should panic
+    let result = env.try_invoke_contract::<_, _>(
+        &contract_address,
+        &soroban_sdk::Symbol::new(&env, "batch_register_meters"),
+        (Vec::<MeterInfo>::new(&env),),
+    );
+    assert!(result.is_err());
+}
 
 #[test]
 fn test_green_energy_bonus() {

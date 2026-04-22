@@ -146,6 +146,67 @@ pub struct ImpactMetrics {
     pub active_meters: u32,
 }
 
+// Issue #118: Zero-Knowledge Privacy Usage Reporting
+// ZK-proof structures for private billing and usage verification
+#[contracttype]
+#[derive(Clone)]
+pub struct ZKProof {
+    pub commitment: BytesN<32>,        // Pedersen commitment to usage amount
+    pub nullifier: BytesN<32>,         // Nullifier to prevent double-spending
+    pub proof: Bytes,                  // ZK-SNARK proof (placeholder for future implementation)
+    pub meter_id: u64,                 // Associated meter ID
+    pub timestamp: u64,                // Proof generation timestamp
+    pub is_valid: bool,                // Proof validity status
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ZKUsageReport {
+    pub commitment: BytesN<32>,        // Commitment to usage data
+    pub nullifier: BytesN<32>,         // Unique nullifier for this report
+    pub encrypted_usage: Bytes,         // Encrypted usage data (for future ZK implementation)
+    pub proof_hash: BytesN<32>,        // Hash of the ZK proof
+    pub meter_id: u64,                 // Meter identifier
+    pub billing_cycle: u32,             // Billing cycle number
+    pub timestamp: u64,                // Report timestamp
+    pub is_verified: bool,              // Verification status
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct PrivateBillingStatus {
+    pub meter_id: u64,                 // Meter ID
+    pub billing_cycle: u32,            // Current billing cycle
+    pub total_commitments: u32,        // Number of commitments received
+    pub verified_proofs: u32,          // Number of verified ZK proofs
+    pub last_verification: u64,        // Last verification timestamp
+    pub privacy_enabled: bool,         // Whether privacy mode is enabled
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct CommitmentBatch {
+    pub commitments: Vec<BytesN<32>>,  // Batch of commitments
+    pub nullifiers: Vec<BytesN<32>>,   // Corresponding nullifiers
+    pub batch_root: BytesN<32>,       // Merkle root of commitments
+    pub timestamp: u64,                // Batch creation time
+    pub meter_id: u64,                 // Associated meter
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct MeterStatus {
+    pub meter_id: u64,
+    pub is_active: bool,
+    pub balance: i128,
+    pub billing_cycle: u32,
+    pub total_commitments: u32,
+    pub verified_proofs: u32,
+    pub privacy_enabled: bool,
+    pub last_update: u64,
+    pub usage_summary: Option<UsageData>,
+}
+
 // Issue #98: Multi-Sig Provider Withdrawal Requirement
 // For large utility companies, withdrawals require 3-of-5 authorized signatures
 // from Finance Department wallets to prevent unauthorized access to streaming revenue
@@ -229,9 +290,13 @@ pub enum DataKey {
     // Issue #119: Maintenance Milestones
     MaintenanceMilestone(u64, u32), // (meter_id, milestone_number)
     // Issue #118: ZK Privacy
-    // Issue #118: ZK Privacy
     ZKProof(BytesN<32>), // Using commitment as key
     NullifierMap(BytesN<32>), // Using nullifier as key
+    ZKUsageReport(u64, u32), // (meter_id, billing_cycle)
+    PrivateBillingStatus(u64), // meter_id -> PrivateBillingStatus
+    CommitmentBatch(u64, u64), // (meter_id, batch_timestamp)
+    ZKEnabledMeters, // Set of meters with privacy enabled
+    ZKVerificationCache(BytesN<32>), // proof_hash -> bool (verification result cache)
     // Issue #130: Grant Stream Integration
     ConservationGoal(u64),
     GrantStreamMatch(u64, Address), // (meter_id, grant_contract)
@@ -320,6 +385,14 @@ pub enum ContractError {
     NotApprovedByWallet = 60,
     AmountBelowMultiSigThreshold = 61,
     MultiSigRequiredForAmount = 62,
+    // Issue #118: ZK Privacy Errors
+    InvalidCommitment = 63,
+    NullifierAlreadyUsed = 64,
+    InvalidZKProof = 65,
+    PrivacyNotEnabled = 66,
+    CommitmentNotFound = 67,
+    InvalidBillingCycle = 68,
+    ZKVerificationFailed = 69,
 }
 
 #[contracttype]
@@ -423,6 +496,7 @@ fn convert_xlm_to_usd_cents_with_rounding(xlm_amount: i128, xlm_price_cents: i12
     } else {
         ((raw_usd - 50) / 100) * 100 // Round down on -.5 or lower
     }
+}
 
     pub fn claim(env: Env, meter_id: u64) {
         let mut meter = get_meter_or_panic(&env, meter_id);
@@ -451,6 +525,24 @@ fn convert_xlm_to_usd_cents_with_rounding(xlm_amount: i128, xlm_price_cents: i12
             }
         }
 
+        // 3. Pay Reseller (if applicable)
+        if settlement.reseller_payout > 0 {
+            if let Some(reseller_config) = get_reseller_config_impl(&env, meter_id) {
+                client.transfer(&env.current_contract_address(), &reseller_config.reseller, &settlement.reseller_payout);
+            }
+        }
+
+        // 4. Pay Provider
+        if settlement.provider_payout > 0 {
+            client.transfer(&env.current_contract_address(), &meter.provider, &settlement.provider_payout);
+        }
+
+        // Update State
+        env.storage().instance().set(&DataKey::ProviderWindow(meter.provider.clone()), &window);
+        update_provider_total_pool(&env, &meter.provider, old_meter_value, provider_meter_value(&meter));
+        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+    }
+
 fn convert_usd_to_token_if_needed(env: &Env, usd_cents: i128, destination_token: &Address) -> Result<i128, ContractError> {
     // For now, we assume the oracle can provide conversion rates for any token
     // In a real implementation, you'd need specific price feeds for each token
@@ -469,17 +561,9 @@ fn convert_usd_to_token_if_needed(env: &Env, usd_cents: i128, destination_token:
                 Ok(usd_cents)
             }
         }
-
-        // 4. Pay Provider
-        if settlement.provider_payout > 0 {
-            client.transfer(&env.current_contract_address(), &meter.provider, &settlement.provider_payout);
-        }
-
-        // Update State
-        env.storage().instance().set(&DataKey::ProviderWindow(meter.provider.clone()), &window);
-        update_provider_total_pool(&env, &meter.provider, old_meter_value, provider_meter_value(&meter));
-        env.storage().instance().set(&DataKey::Meter(meter_id), &meter);
+        None => Err(ContractError::OracleNotSet),
     }
+}
 
     pub fn assign_reseller(env: Env, meter_id: u64, reseller: Address, fee_bps: i128) {
         let meter = get_meter_or_panic(&env, meter_id);
@@ -531,7 +615,6 @@ fn convert_usd_to_token_if_needed(env: &Env, usd_cents: i128, destination_token:
         }
         ImpactMetrics { total_kilowatts_funded: total_wh / 1000, total_liters_streamed: total_val, active_meters: active }
     }
-}
 
 // --- Internal Settlement Logic ---
 
@@ -585,7 +668,7 @@ fn settle_claim_for_meter(
         tax_amount: tax_amt,
         protocol_fee,
         reseller_payout,
-    }
+    };
 
     // Calculate total value (balance + debt if postpaid)
     let total_value = match meter.billing_type {
@@ -736,6 +819,52 @@ fn update_provider_total_pool(env: &Env, provider: &Address, old: i128, new: i12
 fn publish_inactive_event(env: &Env, meter_id: u64, now: u64) {
     env.events()
         .publish((symbol_short!("Inactive"), meter_id), now);
+}
+
+// Issue #118: ZK Privacy Helper Functions
+
+/// Placeholder ZK proof verification (for future full ZK-SNARK implementation)
+/// This is a simple mock verification that checks basic constraints
+fn verify_zk_proof_placeholder(env: &Env, proof_hash: BytesN<32>) -> bool {
+    let now = env.ledger().timestamp();
+    
+    // Simple validation rules for placeholder implementation:
+    // 1. Proof hash should not be all zeros
+    // 2. Basic timestamp validation (proof should be recent)
+    // 3. In production, this would be full ZK-SNARK verification
+    
+    let mut is_non_zero = false;
+    for byte in proof_hash.to_array().iter() {
+        if *byte != 0 {
+            is_non_zero = true;
+            break;
+        }
+    }
+    
+    // For now, accept any non-zero hash as valid (placeholder logic)
+    // In production, this would involve cryptographic verification
+    is_non_zero
+}
+
+/// Generate a simple commitment hash (placeholder for Pedersen commitment)
+fn generate_commitment_placeholder(env: &Env, usage_amount: i128, randomness: BytesN<32>) -> BytesN<32> {
+    // This is a placeholder - in production would use Pedersen commitments
+    let mut combined = Vec::new(&env);
+    combined.push_back(&Bytes::from_slice(&env, &usage_amount.to_be_bytes()));
+    combined.push_back(&randomness);
+    
+    // Simple hash (placeholder - would use proper cryptographic commitment in production)
+    env.crypto().sha256(&combined.to_xdr(&env))
+}
+
+/// Check if a nullifier has been used before
+fn is_nullifier_used(env: &Env, nullifier: BytesN<32>) -> bool {
+    env.storage().instance().has(&DataKey::NullifierMap(nullifier))
+}
+
+/// Store nullifier to prevent double-spending
+fn store_nullifier(env: &Env, nullifier: BytesN<32>) {
+    env.storage().instance().set(&DataKey::NullifierMap(nullifier), &true);
 }
 
 #[contractimpl]
@@ -2214,7 +2343,6 @@ impl UtilityContract {
     }
 
     // Gas Cost Estimator Functions
-<<<<<<< HEAD
     pub fn estimate_meter_monthly_cost(
         env: Env,
         is_group_meter: bool,
@@ -3130,7 +3258,6 @@ env.storage()
             is_active: true,
         };
 
-<<<<<<< HEAD
         env.storage()
             .instance()
             .set(&DataKey::SubDaoConfig(sub_dao.clone()), &config);
@@ -3606,7 +3733,7 @@ let milestone = MaintenanceMilestone {
         }
 
         // Convert USD cents to XLM if needed
-        let withdrawal_amount = match convert_usd_to_xlm_if_needed(
+        let withdrawal_amount = match convert_usd_to_token_if_needed(
             &env,
             request.amount_usd_cents,
             &meter.token,
@@ -3862,6 +3989,240 @@ let milestone = MaintenanceMilestone {
             .instance()
             .get(&DataKey::WithdrawalRequestCount(provider))
             .unwrap_or(0)
+    }
+
+    // ==================== ISSUE #118: ZK PRIVACY USAGE REPORTING ====================
+
+    /// Enable privacy mode for a meter (allows ZK-proof usage reporting)
+    pub fn enable_privacy_mode(env: Env, meter_id: u64) {
+        let meter = get_meter_or_panic(&env, meter_id);
+        meter.user.require_auth();
+
+        // Add meter to privacy-enabled set
+        let mut privacy_meters: Vec<u64> = env.storage()
+            .instance()
+            .get(&DataKey::ZKEnabledMeters)
+            .unwrap_or_else(|| Vec::new(&env));
+        
+        if !privacy_meters.contains(&meter_id) {
+            privacy_meters.push_back(meter_id);
+            env.storage().instance().set(&DataKey::ZKEnabledMeters, &privacy_meters);
+        }
+
+        // Initialize private billing status
+        let billing_status = PrivateBillingStatus {
+            meter_id,
+            billing_cycle: 1,
+            total_commitments: 0,
+            verified_proofs: 0,
+            last_verification: 0,
+            privacy_enabled: true,
+        };
+        env.storage().instance().set(&DataKey::PrivateBillingStatus(meter_id), &billing_status);
+
+        env.events().publish(
+            (symbol_short!("PrivacyOn"), meter_id),
+            meter.user.clone(),
+        );
+    }
+
+    /// Disable privacy mode for a meter
+    pub fn disable_privacy_mode(env: Env, meter_id: u64) {
+        let meter = get_meter_or_panic(&env, meter_id);
+        meter.user.require_auth();
+
+        // Remove meter from privacy-enabled set
+        let mut privacy_meters: Vec<u64> = env.storage()
+            .instance()
+            .get(&DataKey::ZKEnabledMeters)
+            .unwrap_or_else(|| Vec::new(&env));
+        
+        let mut new_meters = Vec::new(&env);
+        for id in privacy_meters.iter() {
+            if id != meter_id {
+                new_meters.push_back(id);
+            }
+        }
+        env.storage().instance().set(&DataKey::ZKEnabledMeters, &new_meters);
+
+        // Update billing status
+        if let Some(mut status) = env.storage().instance().get::<_, PrivateBillingStatus>(&DataKey::PrivateBillingStatus(meter_id)) {
+            status.privacy_enabled = false;
+            env.storage().instance().set(&DataKey::PrivateBillingStatus(meter_id), &status);
+        }
+
+        env.events().publish(
+            (symbol_short!("PrivacyOff"), meter_id),
+            meter.user.clone(),
+        );
+    }
+
+    /// Submit ZK usage report with commitment and nullifier
+    pub fn submit_zk_usage_report(
+        env: Env,
+        meter_id: u64,
+        commitment: BytesN<32>,
+        nullifier: BytesN<32>,
+        encrypted_usage: Bytes,
+        proof_hash: BytesN<32>,
+    ) {
+        let meter = get_meter_or_panic(&env, meter_id);
+        meter.user.require_auth();
+
+        // Check if privacy mode is enabled
+        let privacy_status: PrivateBillingStatus = env.storage()
+            .instance()
+            .get(&DataKey::PrivateBillingStatus(meter_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::PrivacyNotEnabled));
+        
+        if !privacy_status.privacy_enabled {
+            panic_with_error!(&env, ContractError::PrivacyNotEnabled);
+        }
+
+        // Check if nullifier has been used before (prevent double-spending)
+        if env.storage().instance().has(&DataKey::NullifierMap(nullifier.clone())) {
+            panic_with_error!(&env, ContractError::NullifierAlreadyUsed);
+        }
+
+        // Store nullifier to prevent reuse
+        env.storage().instance().set(&DataKey::NullifierMap(nullifier.clone()), &true);
+
+        // Create and store ZK usage report
+        let zk_report = ZKUsageReport {
+            commitment: commitment.clone(),
+            nullifier: nullifier.clone(),
+            encrypted_usage,
+            proof_hash,
+            meter_id,
+            billing_cycle: privacy_status.billing_cycle,
+            timestamp: env.ledger().timestamp(),
+            is_verified: false,
+        };
+
+        env.storage().instance().set(&DataKey::ZKUsageReport(meter_id, privacy_status.billing_cycle), &zk_report);
+
+        // Store commitment
+        env.storage().instance().set(&DataKey::ZKProof(commitment.clone()), &ZKProof {
+            commitment: commitment.clone(),
+            nullifier: nullifier.clone(),
+            proof: Bytes::new(&env),
+            meter_id,
+            timestamp: env.ledger().timestamp(),
+            is_valid: false,
+        });
+
+        // Update billing status
+        let mut updated_status = privacy_status.clone();
+        updated_status.total_commitments += 1;
+        env.storage().instance().set(&DataKey::PrivateBillingStatus(meter_id), &updated_status);
+
+        env.events().publish(
+            (symbol_short!("ZKReport"), meter_id),
+            (commitment, privacy_status.billing_cycle),
+        );
+    }
+
+    /// Get status of meter with privacy considerations
+    pub fn get_status(env: Env, meter_id: u64, requester: Address) -> MeterStatus {
+        let meter = get_meter_or_panic(&env, meter_id);
+        
+        // Check if privacy mode is enabled
+        let privacy_status: Option<PrivateBillingStatus> = env.storage()
+            .instance()
+            .get(&DataKey::PrivateBillingStatus(meter_id));
+
+        match privacy_status {
+            Some(status) if status.privacy_enabled => {
+                // Return privacy-preserving status
+                MeterStatus {
+                    meter_id,
+                    is_active: meter.is_active,
+                    balance: if requester == meter.user || requester == meter.provider {
+                        meter.balance
+                    } else {
+                        0 // Hide balance from unauthorized parties
+                    },
+                    billing_cycle: status.billing_cycle,
+                    total_commitments: status.total_commitments,
+                    verified_proofs: status.verified_proofs,
+                    privacy_enabled: true,
+                    last_update: meter.last_update,
+                    // Hide detailed usage data when privacy is enabled
+                    usage_summary: None,
+                }
+            }
+            _ => {
+                // Return full status when privacy is disabled
+                MeterStatus {
+                    meter_id,
+                    is_active: meter.is_active,
+                    balance: meter.balance,
+                    billing_cycle: 0,
+                    total_commitments: 0,
+                    verified_proofs: 0,
+                    privacy_enabled: false,
+                    last_update: meter.last_update,
+                    usage_summary: Some(meter.usage_data.clone()),
+                }
+            }
+        }
+    }
+
+    /// Verify ZK proof (placeholder for future full ZK implementation)
+    pub fn verify_zk_proof(env: Env, meter_id: u64, proof_hash: BytesN<32>) -> bool {
+        // Check if meter has privacy enabled
+        let privacy_status: PrivateBillingStatus = env.storage()
+            .instance()
+            .get(&DataKey::PrivateBillingStatus(meter_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::PrivacyNotEnabled));
+
+        if !privacy_status.privacy_enabled {
+            panic_with_error!(&env, ContractError::PrivacyNotEnabled);
+        }
+
+        // Check verification cache first
+        if let Some(cached_result) = env.storage().instance().get::<_, bool>(&DataKey::ZKVerificationCache(proof_hash)) {
+            return cached_result;
+        }
+
+        // For now, implement a simple verification (placeholder for full ZK-SNARK)
+        // In production, this would verify the actual ZK proof
+        let is_valid = verify_zk_proof_placeholder(&env, proof_hash);
+
+        // Cache the result
+        env.storage().instance().set(&DataKey::ZKVerificationCache(proof_hash), &is_valid);
+
+        if is_valid {
+            // Update verified proofs count
+            let mut updated_status = privacy_status;
+            updated_status.verified_proofs += 1;
+            updated_status.last_verification = env.ledger().timestamp();
+            env.storage().instance().set(&DataKey::PrivateBillingStatus(meter_id), &updated_status);
+
+            env.events().publish(
+                (symbol_short!("ZKVerified"), meter_id),
+                proof_hash,
+            );
+        }
+
+        is_valid
+    }
+
+    /// Get private billing status for a meter
+    pub fn get_private_billing_status(env: Env, meter_id: u64) -> PrivateBillingStatus {
+        env.storage()
+            .instance()
+            .get(&DataKey::PrivateBillingStatus(meter_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::PrivacyNotEnabled))
+    }
+
+    /// Check if a meter has privacy enabled
+    pub fn is_privacy_enabled(env: Env, meter_id: u64) -> bool {
+        if let Some(status) = env.storage().instance().get::<_, PrivateBillingStatus>(&DataKey::PrivateBillingStatus(meter_id)) {
+            status.privacy_enabled
+        } else {
+            false
+        }
     }
 }
 
