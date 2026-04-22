@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 5,
+    "address": 6,
     "nonce": 0,
     "mux_id": 0
   },
@@ -190,234 +190,47 @@
                   "storage": [
                     {
                       "key": {
-                        "vec": [
-                          {
-                            "symbol": "Count"
-                          }
-                        ]
+                        "vec": [ { "symbol": "Count" } ]
                       },
-                      "val": {
-                        "u64": "1"
-                      }
+                      "val": { "u64": "1" }
                     },
                     {
                       "key": {
-                        "vec": [
-                          {
-                            "symbol": "Meter"
-                          },
-                          {
-                            "u64": "1"
-                          }
-                        ]
+                        "vec": [ { "symbol": "Meter" }, { "u64": "1" } ]
                       },
                       "val": {
                         "map": [
+                          { "key": { "symbol": "balance" }, "val": { "i128": "500" } },
+                          { "key": { "symbol": "billing_type" }, "val": { "vec": [ { "symbol": "PrePaid" } ] } },
+                          { "key": { "symbol": "claimed_this_hour" }, "val": { "i128": "0" } },
+                          { "key": { "symbol": "collateral_limit" }, "val": { "i128": "0" } },
+                          { "key": { "symbol": "debt" }, "val": { "i128": "0" } },
+                          { "key": { "symbol": "device_public_key" }, "val": { "bytes": "0101010101010101010101010101010101010101010101010101010101010101" } },
+                          { "key": { "symbol": "heartbeat" }, "val": { "u64": "0" } },
+                          { "key": { "symbol": "is_active" }, "val": { "bool": true } },
+                          { "key": { "symbol": "is_paired" }, "val": { "bool": false } },
+                          { "key": { "symbol": "last_claim_time" }, "val": { "u64": "0" } },
+                          { "key": { "symbol": "last_update" }, "val": { "u64": "0" } },
+                          { "key": { "symbol": "max_flow_rate_per_hour" }, "val": { "i128": "36000" } },
+                          { "key": { "symbol": "off_peak_rate" }, "val": { "i128": "10" } },
+                          { "key": { "symbol": "peak_rate" }, "val": { "i128": "15" } },
+                          { "key": { "symbol": "provider" }, "val": { "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M" } },
+                          { "key": { "symbol": "rate_per_second" }, "val": { "i128": "10" } },
+                          { "key": { "symbol": "rate_per_unit" }, "val": { "i128": "10" } },
+                          { "key": { "symbol": "token" }, "val": { "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG" } },
                           {
-                            "key": {
-                              "symbol": "balance"
-                            },
-                            "val": {
-                              "i128": "500"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "billing_type"
-                            },
-                            "val": {
-                              "vec": [
-                                {
-                                  "symbol": "PrePaid"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "claimed_this_hour"
-                            },
-                            "val": {
-                              "i128": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "collateral_limit"
-                            },
-                            "val": {
-                              "i128": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "debt"
-                            },
-                            "val": {
-                              "i128": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "device_public_key"
-                            },
-                            "val": {
-                              "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "heartbeat"
-                            },
-                            "val": {
-                              "u64": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "is_active"
-                            },
-                            "val": {
-                              "bool": true
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "is_paired"
-                            },
-                            "val": {
-                              "bool": false
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "last_claim_time"
-                            },
-                            "val": {
-                              "u64": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "last_update"
-                            },
-                            "val": {
-                              "u64": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "max_flow_rate_per_hour"
-                            },
-                            "val": {
-                              "i128": "36000"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "off_peak_rate"
-                            },
-                            "val": {
-                              "i128": "10"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "peak_rate"
-                            },
-                            "val": {
-                              "i128": "15"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "provider"
-                            },
-                            "val": {
-                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "rate_per_second"
-                            },
-                            "val": {
-                              "i128": "10"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "rate_per_unit"
-                            },
-                            "val": {
-                              "i128": "10"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "token"
-                            },
-                            "val": {
-                              "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "usage_data"
-                            },
+                            "key": { "symbol": "usage_data" },
                             "val": {
                               "map": [
-                                {
-                                  "key": {
-                                    "symbol": "current_cycle_watt_hours"
-                                  },
-                                  "val": {
-                                    "i128": "0"
-                                  }
-                                },
-                                {
-                                  "key": {
-                                    "symbol": "last_reading_timestamp"
-                                  },
-                                  "val": {
-                                    "u64": "0"
-                                  }
-                                },
-                                {
-                                  "key": {
-                                    "symbol": "peak_usage_watt_hours"
-                                  },
-                                  "val": {
-                                    "i128": "0"
-                                  }
-                                },
-                                {
-                                  "key": {
-                                    "symbol": "precision_factor"
-                                  },
-                                  "val": {
-                                    "i128": "1000"
-                                  }
-                                },
-                                {
-                                  "key": {
-                                    "symbol": "total_watt_hours"
-                                  },
-                                  "val": {
-                                    "i128": "0"
-                                  }
-                                }
+                                { "key": { "symbol": "current_cycle_watt_hours" }, "val": { "i128": "0" } },
+                                { "key": { "symbol": "last_reading_timestamp" }, "val": { "u64": "0" } },
+                                { "key": { "symbol": "peak_usage_watt_hours" }, "val": { "i128": "0" } },
+                                { "key": { "symbol": "precision_factor" }, "val": { "i128": "1000" } },
+                                { "key": { "symbol": "total_watt_hours" }, "val": { "i128": "0" } }
                               ]
                             }
                           },
-                          {
-                            "key": {
-                              "symbol": "user"
-                            },
-                            "val": {
-                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                            }
-                          }
+                          { "key": { "symbol": "user" }, "val": { "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4" } }
                         ]
                       }
                     }
@@ -429,170 +242,6 @@
           "ext": "v0"
         },
         "live_until": 4095
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "1033654523790656264"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "4837995959683129791"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "5541220902715666415"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG",
-              "key": {
-                "vec": [
-                  {
-                    "symbol": "Balance"
-                  },
-                  {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
-                  }
-                ]
-              },
-              "durability": "persistent",
-              "val": {
-                "map": [
-                  {
-                    "key": {
-                      "symbol": "amount"
-                    },
-                    "val": {
-                      "i128": "500"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "authorized"
-                    },
-                    "val": {
-                      "bool": true
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "clawback"
-                    },
-                    "val": {
-                      "bool": false
-                    }
-                  }
-                ]
-              }
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 518400
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG",
-              "key": {
-                "vec": [
-                  {
-                    "symbol": "Balance"
-                  },
-                  {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                  }
-                ]
-              },
-              "durability": "persistent",
-              "val": {
-                "map": [
-                  {
-                    "key": {
-                      "symbol": "amount"
-                    },
-                    "val": {
-                      "i128": "500"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "authorized"
-                    },
-                    "val": {
-                      "bool": true
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "clawback"
-                    },
-                    "val": {
-                      "bool": false
-                    }
-                  }
-                ]
-              }
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 518400
       },
       {
         "entry": {
@@ -608,81 +257,28 @@
                   "executable": "stellar_asset",
                   "storage": [
                     {
-                      "key": {
-                        "symbol": "METADATA"
-                      },
+                      "key": { "symbol": "METADATA" },
                       "val": {
                         "map": [
-                          {
-                            "key": {
-                              "symbol": "decimal"
-                            },
-                            "val": {
-                              "u32": 7
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "name"
-                            },
-                            "val": {
-                              "string": "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAL7NV"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "symbol"
-                            },
-                            "val": {
-                              "string": "aaa"
-                            }
-                          }
+                          { "key": { "symbol": "decimal" }, "val": { "u32": 7 } },
+                          { "key": { "symbol": "name" }, "val": { "string": "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAL7NV" } },
+                          { "key": { "symbol": "symbol" }, "val": { "string": "aaa" } }
                         ]
                       }
                     },
                     {
-                      "key": {
-                        "vec": [
-                          {
-                            "symbol": "Admin"
-                          }
-                        ]
-                      },
-                      "val": {
-                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                      }
+                      "key": { "vec": [ { "symbol": "Admin" } ] },
+                      "val": { "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4" }
                     },
                     {
-                      "key": {
-                        "vec": [
-                          {
-                            "symbol": "AssetInfo"
-                          }
-                        ]
-                      },
+                      "key": { "vec": [ { "symbol": "AssetInfo" } ] },
                       "val": {
                         "vec": [
-                          {
-                            "symbol": "AlphaNum4"
-                          },
+                          { "symbol": "AlphaNum4" },
                           {
                             "map": [
-                              {
-                                "key": {
-                                  "symbol": "asset_code"
-                                },
-                                "val": {
-                                  "string": "aaa\\0"
-                                }
-                              },
-                              {
-                                "key": {
-                                  "symbol": "issuer"
-                                },
-                                "val": {
-                                  "bytes": "0000000000000000000000000000000000000000000000000000000000000005"
-                                }
-                              }
+                              { "key": { "symbol": "asset_code" }, "val": { "string": "aaa\\0" } },
+                              { "key": { "symbol": "issuer" }, "val": { "bytes": "0000000000000000000000000000000000000000000000000000000000000005" } }
                             ]
                           }
                         ]
@@ -696,20 +292,6 @@
           "ext": "v0"
         },
         "live_until": 120960
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_code": {
-              "ext": "v0",
-              "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-              "code": ""
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 4095
       }
     ]
   },
@@ -722,22 +304,12 @@
         "body": {
           "v0": {
             "topics": [
-              {
-                "symbol": "transfer"
-              },
-              {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-              },
-              {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
-              },
-              {
-                "string": "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAL7NV"
-              }
+              { "symbol": "transfer" },
+              { "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4" },
+              { "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM" },
+              { "string": "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAL7NV" }
             ],
-            "data": {
-              "i128": "500"
-            }
+            "data": { "i128": "500" }
           }
         }
       },
@@ -750,47 +322,8 @@
         "type_": "contract",
         "body": {
           "v0": {
-            "topics": [
-              {
-                "symbol": "Active"
-              },
-              {
-                "u64": "1"
-              }
-            ],
-            "data": {
-              "u64": "0"
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "TokenUp"
-              },
-              {
-                "u64": "1"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "i128": "500"
-                },
-                {
-                  "i128": "500"
-                }
-              ]
-            }
+            "topics": [ { "symbol": "TokenUp" }, { "u64": "1" } ],
+            "data": { "vec": [ { "i128": "500" }, { "i128": "500" } ] }
           }
         }
       },
