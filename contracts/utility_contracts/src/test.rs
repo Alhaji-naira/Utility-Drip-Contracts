@@ -60,13 +60,13 @@ fn test_grace_period_expiration() {
         .address();
     let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
 
-    token_admin_client.mint(&user, &1000);
+    token_admin_client.mint(&user, &2000);
 
     let device_public_key = device_key(&env, 1);
     // Integrated Seasonal/Sustainability params: end_date (0) and rent_deposit (0)
     let meter_id = client.register_meter(&user, &provider, &10, &token_address, &device_public_key, &0, &0);
 
-    // Top up with minimum balance to activate
+    // Top up with balance to activate
     client.top_up(&meter_id, &500);
     let meter = client.get_meter(&meter_id).unwrap();
     assert!(meter.is_active);
@@ -117,6 +117,8 @@ fn test_peak_hour_tariff() {
     client.initiate_pairing(&meter_id);
     client.complete_pairing(&meter_id, &BytesN::from_array(&env, &[2u8; 64]));
 
+    client.initiate_pairing(&meter_id);
+    client.complete_pairing(&meter_id, &BytesN::from_array(&env, &[2u8; 64]));
     client.top_up(&meter_id, &5000);
 
     // 19:00 UTC Peak hours

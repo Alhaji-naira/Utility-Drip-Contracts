@@ -5,7 +5,7 @@ use soroban_sdk::{
     Address, Env, BytesN, Vec, Symbol,
 };
 
-// --- Constants ---
+// --- Constants (Merged) ---
 const DEFAULT_BUFFER_DAYS: i128 = 3;
 const TRUSTED_BUFFER_DAYS: i128 = 1;
 const MINIMUM_BALANCE_TO_FLOW: i128 = 500;
@@ -23,6 +23,13 @@ const XLM_PRECISION: i128 = 10_000_000;
 const DEFAULT_TAX_RATE_BPS: i128 = 500;
 const MAINTENANCE_FUND_PERCENT_BPS: i128 = 1;
 const LEDGER_LIFETIME_EXTENSION: u32 = 1_000_000;
+const AUTO_EXTEND_LEDGER_THRESHOLD: u32 = 500_000;
+const UPGRADE_VETO_PERIOD_SECONDS: u64 = 7 * DAY_IN_SECONDS;
+const ADMIN_TRANSFER_TIMELOCK: u64 = 48 * HOUR_IN_SECONDS;
+const VETO_THRESHOLD_BPS: i128 = 1000;
+const WITHDRAWAL_REQUEST_EXPIRY: u64 = 7 * DAY_IN_SECONDS;
+const MIN_FINANCE_WALLETS: usize = 3;
+const MAX_FINANCE_WALLETS: usize = 5;
 
 // --- Data Structures ---
 
@@ -184,6 +191,9 @@ impl UtilityContract {
         
         let mut count = env.storage().instance().get::<DataKey, u64>(&DataKey::Count).unwrap_or(0);
         count += 1;
+
+        let mut active_count = env.storage().instance().get::<_, u32>(&DataKey::ActiveMetersCount).unwrap_or(0);
+        active_count += 1;
 
         let now = env.ledger().timestamp();
         let peak_rate = off_peak_rate.saturating_mul(PEAK_RATE_MULTIPLIER) / RATE_PRECISION;
