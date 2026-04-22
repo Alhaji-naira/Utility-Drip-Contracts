@@ -150,6 +150,149 @@ fn test_green_energy_bonus() {
     let provider = Address::generate(&env);
     let token_address = create_token(&env);
 
+    let susu_id = env.register_contract(None, mock_sorosusu::MockSoroSusu);
+    let susu_client = mock_sorosusu::MockSoroSusuClient::new(&env, &susu_id);
+
+    let user = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let token_address = create_token(&env);
+    let token_admin = token::StellarAssetClient::new(&env, &token_address);
+
+    token_admin.mint(&user, &100_000);
+    client.set_tax_rate(&0);
+    client.set_sorosusu_contract(&susu_id);
+
+    let meter_id = client.register_meter(&user, &provider, &10, &token_address, &device_key(&env, 42));
+    client.top_up(&meter_id, &100_000);
+
+    // Generate maintenance fund via claim
+    env.ledger().set_timestamp(1_000);
+    client.claim(&meter_id);
+
+    let fund_before = client.get_maintenance_fund(&meter_id);
+    susu_client.set_default(&user, &true);
+
+    client.service_sorosusu_debt(&meter_id);
+
+    let fund_after = client.get_maintenance_fund(&meter_id);
+    assert!(fund_after < fund_before);
+}
+
+// ==================== PROVIDER RELIABILITY TESTS ====================
+
+#[test]
+fn test_reliability_score_logic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
+    let provider = Address::generate(&env);
+
+    // Report 99 online windows out of 100
+    for _ in 0..99u32 {
+        client.report_provider_uptime(&provider, &true);
+    }
+    client.report_provider_uptime(&provider, &false);
+
+    let score = client.get_reliability_score(&provider).unwrap();
+    assert_eq!(score.score_bps, 9900);
+    assert_eq!(score.badge, ReliabilityBadge::Gold);
+}
+
+#[test]
+fn test_reliability_score_reset_impact() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_id);
+    let provider = Address::generate(&env);
+
+    // Create meter info vector
+    let mut meter_infos = Vec::new(&env);
+    meter_infos.push_back(MeterInfo {
+        user: user1.clone(),
+        provider: provider.clone(),
+        off_peak_rate: 100,
+        token: token_address.clone(),
+        billing_type: BillingType::PrePaid,
+        device_public_key: device_key1,
+    });
+    meter_infos.push_back(MeterInfo {
+        user: user2.clone(),
+        provider: provider.clone(),
+        off_peak_rate: 200,
+        token: token_address.clone(),
+        billing_type: BillingType::PostPaid,
+        device_public_key: device_key2,
+    });
+    meter_infos.push_back(MeterInfo {
+        user: user3.clone(),
+        provider: provider.clone(),
+        off_peak_rate: 150,
+        token: token_address.clone(),
+        billing_type: BillingType::PrePaid,
+        device_public_key: device_key3,
+    });
+
+    // Call batch_register_meters
+    let batch_event = client.batch_register_meters(&meter_infos);
+
+    // Verify batch event
+    assert_eq!(batch_event.start_id, 1);
+    assert_eq!(batch_event.end_id, 3);
+    assert_eq!(batch_event.count, 3);
+
+    // Verify individual meters were created
+    let meter1 = client.get_meter(&1);
+    assert!(meter1.is_some());
+    let meter1 = meter1.unwrap();
+    assert_eq!(meter1.user, user1);
+    assert_eq!(meter1.off_peak_rate, 100);
+    assert_eq!(meter1.billing_type, BillingType::PrePaid);
+
+    let meter2 = client.get_meter(&2);
+    assert!(meter2.is_some());
+    let meter2 = meter2.unwrap();
+    assert_eq!(meter2.user, user2);
+    assert_eq!(meter2.off_peak_rate, 200);
+    assert_eq!(meter2.billing_type, BillingType::PostPaid);
+
+    let meter3 = client.get_meter(&3);
+    assert!(meter3.is_some());
+    let meter3 = meter3.unwrap();
+    assert_eq!(meter3.user, user3);
+    assert_eq!(meter3.off_peak_rate, 150);
+    assert_eq!(meter3.billing_type, BillingType::PrePaid);
+}
+
+#[test]
+fn test_batch_register_meters_empty_vector() {
+    let env = Env::default();
+    let contract_address = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_address);
+    
+    // Test with empty vector should panic
+    let result = env.try_invoke_contract::<_, _>(
+        &contract_address,
+        &soroban_sdk::Symbol::new(&env, "batch_register_meters"),
+        (Vec::<MeterInfo>::new(&env),),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_green_energy_bonus() {
+    let env = Env::default();
+    let contract_address = env.register_contract(None, UtilityContract);
+    let client = UtilityContractClient::new(&env, &contract_address);
+
+    let user = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let token_address = Address::generate(&env);
+
+    // Register a meter
     let meter_id = client.register_meter_with_mode(
         &user,
         &provider,
