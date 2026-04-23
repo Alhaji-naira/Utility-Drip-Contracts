@@ -5,35 +5,31 @@ use soroban_sdk::{
     Address, Env, BytesN, Vec, Symbol,
 };
 
-// --- Constants (Merged) ---
-const DEFAULT_BUFFER_DAYS: i128 = 3;
-const TRUSTED_BUFFER_DAYS: i128 = 1;
-const MINIMUM_BALANCE_TO_FLOW: i128 = 500;
-const HOUR_IN_SECONDS: u64 = 60 * 60;
-const DAY_IN_SECONDS: u64 = 24 * HOUR_IN_SECONDS;
-const GRACE_PERIOD_SECONDS: u64 = 86_400;
-const HEARTBEAT_THRESHOLD_SECONDS: u64 = 300;
-const DEBT_THRESHOLD: i128 = -10_000_000;
-const MAX_USAGE_PER_UPDATE: i128 = 1_000_000_000_000i128;
-const MAX_TIMESTAMP_DELAY: u64 = 300;
-const PEAK_HOUR_START: u64 = 18 * HOUR_IN_SECONDS;
-const PEAK_HOUR_END: u64 = 21 * HOUR_IN_SECONDS;
-const PEAK_RATE_MULTIPLIER: i128 = 3; 
-const RATE_PRECISION: i128 = 2;
-const XLM_PRECISION: i128 = 10_000_000;
-const DEFAULT_TAX_RATE_BPS: i128 = 500;
-const MAINTENANCE_FUND_PERCENT_BPS: i128 = 1;
-const LEDGER_LIFETIME_EXTENSION: u32 = 1_000_000;
-const AUTO_EXTEND_LEDGER_THRESHOLD: u32 = 500_000;
-const UPGRADE_VETO_PERIOD_SECONDS: u64 = 7 * DAY_IN_SECONDS;
-const ADMIN_TRANSFER_TIMELOCK: u64 = 48 * HOUR_IN_SECONDS;
-const VETO_THRESHOLD_BPS: i128 = 1000;
-const WITHDRAWAL_REQUEST_EXPIRY: u64 = 7 * DAY_IN_SECONDS;
-const MIN_FINANCE_WALLETS: usize = 3;
-const MAX_FINANCE_WALLETS: usize = 5;
-const REFERRAL_REWARD_UNITS: i128 = 500;
+// Oracle client interface
+use soroban_sdk::contractclient;
 
-// --- Data Structures ---
+#[contractclient(name = "PriceOracleClient")]
+pub trait PriceOracle {
+    fn xlm_to_usd_cents(env: Env, xlm_amount: i128) -> i128;
+    fn usd_cents_to_xlm(env: Env, usd_cents: i128) -> i128;
+    fn get_price(env: Env) -> PriceData;
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct PriceData {
+    pub price: i128,
+    pub decimals: u32,
+    pub last_updated: u64,
+}
+#[cfg(test)]
+mod debt_fuzz_tests;
+#[cfg(test)]
+mod fuzz_tests;
+#[cfg(test)]
+mod dust_sweeper_tests;
+#[cfg(test)]
+mod dust_sweeper_basic_tests;
 
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -414,6 +410,24 @@ pub struct StreamUpdatedEvent {
 }
 
 #[contracttype]
+#[derive(Clone)]
+pub struct DustCollectedEvent {
+    pub token_address: Address,
+    pub total_dust_swept: i128,
+    pub streams_swept: u64,
+    pub timestamp: u64,
+    pub sweeper_address: Address,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct DustAggregation {
+    pub total_dust: i128,
+    pub stream_count: u64,
+    pub last_updated: u64,
+}
+
+#[contracttype]
 pub enum DataKey {
     Meter(u64),
     Count,
@@ -429,71 +443,10 @@ pub enum DataKey {
     SupportedToken(Address),
     SupportedWithdrawalToken(Address),
     ProviderTotalPool(Address),
-    Referral(Address),
-    PollVotes(Symbol),
-    UserVoted(Address, Symbol),
-    BillingGroup(Address),
-    WebhookConfig(Address),
-    LastAlert(u64),
-    ClosingFeeBps,
-    Contributor(u64, Address),
-    AuthorizedContributor(u64, Address),
-    // Task #2: Tax Compliance
-    GovernmentVault(Address),
-    TaxRateBps, // Tax rate in basis points (e.g., 500 = 5%)
-    // Task #3: Self-Maintenance
-    MaintenanceFund(u64), // Per-meter maintenance fund balance
-    AutoExtendThreshold, // Ledger threshold for auto-extension
-    // Task #4: Wasm Hash Rotation
-    ProposedUpgrade,
-    UpgradeProposalTime,
-    VetoDeadline,
-    UserVetoed(Address, u64), // Address and proposal ID
-    // NEW TASKS:
-    // Task #1: Admin Transfer
-    CurrentAdmin,
-    AdminTransferProposal,
-    AdminVeto(Address, u64), // Address and proposal timestamp
-    ActiveUsers, // For tracking active users for voting
-    // Task #2: Legal Freeze
-    ComplianceOfficer,
-    ComplianceCouncil,
-    LegalFreeze(u64),
-    LegalVault,
-    // Task #3: Verified Provider Registry
-    VerifiedProvider(Address),
-    // Issue #127: Reputation Migration
-    UserReputation(Address),
-    ReputationMigration(BytesN<32>), // Using nullifier as key
-    MigratedReputation(Address, Address), // (user, old_contract)
-    // Issue #119: Maintenance Milestones
-    MaintenanceMilestone(u64, u32), // (meter_id, milestone_number)
-    // Issue #118: ZK Privacy
-    ZKProof(BytesN<32>), // Using commitment as key
-    NullifierMap(BytesN<32>), // Using nullifier as key
-    ZKUsageReport(u64, u32), // (meter_id, billing_cycle)
-    PrivateBillingStatus(u64), // meter_id -> PrivateBillingStatus
-    CommitmentBatch(u64, u64), // (meter_id, batch_timestamp)
-    ZKEnabledMeters, // Set of meters with privacy enabled
-    ZKVerificationCache(BytesN<32>), // proof_hash -> bool
-    ZKVerificationKey(u64), // meter_id -> Groth16VerificationKey
-    // Issue #130: Grant Stream Integration
-    ConservationGoal(u64),
-    GrantStreamMatch(u64, Address), // (meter_id, grant_contract)
-    // Task #4: Sub-DAO
-    SubDaoConfig(Address),
-    // Issue #98: Multi-Sig Provider Withdrawal
-    MultiSigConfig(Address),           // Provider address -> MultiSigConfig
-    WithdrawalRequest(Address, u64),   // Provider address, request ID -> WithdrawalRequest
-    WithdrawalRequestCount(Address),   // Provider address -> request counter
-    WithdrawalApproval(Address, u64, Address), // Provider, request ID, signer -> bool
-    // Streaming-Limit Circuit Breaker
-    VelocityLimitConfig,               // Global velocity configuration
-    VelocityOverride(u64),             // meter_id (0 for global) -> VelocityOverride
-    // Device MAC Address Mapping
-    DeviceHash(BytesN<32>),            // SHA-256 hash of MAC address -> meter_id
-    MeterDevice(u64),                  // meter_id -> SHA-256 hash of MAC address
-    PendingDeviceTransfer(BytesN<32>, Address), // (device_hash, new_owner) -> current_owner (for mutual consent)
+    ContinuousFlow(u64),
+    DustAggregation(Address),
+    AdminAddress,
+    GasBountyPool,
 }
 
 #[contracterror]
@@ -515,86 +468,9 @@ pub enum ContractError {
     ChallengeNotFound = 13,
     InvalidPairingSignature = 14,
     MeterNotPaired = 15,
-    MeterPaused = 16,
-    AlreadyVoted = 17,
-    InvalidClosingFee = 18,
-    AccountAlreadyClosed = 19,
-    InsufficientBalance = 20,
-    UnauthorizedContributor = 21,
-    InDispute = 22,
-    ChallengeActive = 23,
-    NotAnOracle = 24,
-    // Task #1: Priority System Errors
-    ThrottlingThresholdExceeded = 25,
-    LowPriorityStreamPaused = 26,
-    // Task #2: Tax Compliance Errors
-    GovernmentVaultNotSet = 27,
-    TaxCalculationFailed = 28,
-    // Task #3: Maintenance Errors
-    MaintenanceFundInsufficient = 29,
-    TTLExtensionFailed = 30,
-    // Task #4: Upgrade Errors
-    UpgradeProposalActive = 31,
-    VetoPeriodExpired = 32,
-    UserVetoedProposal = 33,
-    InvalidWasmHash = 34,
-    // NEW TASKS:
-    // Task #1: Admin Transfer Errors
-    AdminTransferActive = 35,
-    NoAdminTransferInProgress = 36,
-    VetoThresholdNotReached = 37,
-    AdminExecutionWindowExpired = 38,
-    NotCurrentAdmin = 39,
-    // Task #2: Legal Freeze Errors
-    NotComplianceOfficer = 40,
-    MeterNotFrozen = 41,
-    LegalFreezeAlreadyActive = 42,
-    ComplianceCouncilApprovalRequired = 43,
-    // Task #3: Verified Provider Errors
-    ProviderNotVerified = 44,
-    VerificationAlreadyGranted = 45,
-    // Task #4: Sub-DAO Errors
-    NotParentDao = 46,
-    SubDaoBudgetExceeded = 47,
-    SubDaoNotConfigured = 48,
-    // Issue #98: Multi-Sig Withdrawal Errors
-    MultiSigNotConfigured = 49,
-    MultiSigAlreadyConfigured = 50,
-    InvalidFinanceWalletCount = 51,
-    InvalidSignatureThreshold = 52,
-    NotAuthorizedFinanceWallet = 53,
-    WithdrawalRequestNotFound = 54,
-    WithdrawalRequestExpired = 55,
-    WithdrawalAlreadyExecuted = 56,
-    WithdrawalAlreadyCancelled = 57,
-    InsufficientApprovals = 58,
-    AlreadyApprovedWithdrawal = 59,
-    NotApprovedByWallet = 60,
-    AmountBelowMultiSigThreshold = 61,
-    MultiSigRequiredForAmount = 62,
-    // Issue #118: ZK Privacy Errors
-    InvalidCommitment = 63,
-    NullifierAlreadyUsed = 64,
-    InvalidZKProof = 65,
-    PrivacyNotEnabled = 66,
-    CommitmentNotFound = 67,
-    InvalidBillingCycle = 68,
-    ZKVerificationFailed = 69,
-    // Issue #130: Grant Stream Integration Errors
-    ConservationGoalNotFound = 70,
-    GoalAlreadyAchieved = 71,
-    GoalExpired = 72,
-    InvalidGrantAmount = 73,
-    GrantStreamNotConfigured = 74,
-    InsufficientWaterSavings = 75,
-    // Streaming-Limit Circuit Breaker Errors
-    PerStreamVelocityLimitExceeded = 76,
-    GlobalVelocityLimitExceeded = 77,
-    VelocityLimitBreach = 78,
-    // Device MAC Address Mapping Errors
-    DeviceAlreadyBoundToAnotherMeter = 79,
-    InvalidDeviceTransfer = 80,
-    DeviceTransferNotInitiated = 81,
+    UnauthorizedAdmin = 16,
+    InsufficientGasBounty = 17,
+    NoDustToSweep = 18,
 }
 
 #[contracttype]
@@ -607,8 +483,40 @@ pub struct PairingChallengeData {
 
 // --- Internal Helpers ---
 
-fn get_seasonal_multiplier(env: &Env) -> i128 {
-    env.storage().instance().get(&DataKey::SeasonalFactor).unwrap_or(100)
+const HOUR_IN_SECONDS: u64 = 60 * 60;
+const DAY_IN_SECONDS: u64 = 24 * HOUR_IN_SECONDS;
+const GRACE_PERIOD_SECONDS: u64 = 86_400; // 24 hours grace period
+const DEBT_THRESHOLD: i128 = -10_000_000; // -10 XLM (in stroops) threshold for negative balance
+const DAILY_WITHDRAWAL_PERCENT: i128 = 10;
+const MAX_USAGE_PER_UPDATE: i128 = 1_000_000_000_000i128; // 1 billion kWh max per update
+const MIN_PRECISION_FACTOR: i128 = 1;
+const MAX_TIMESTAMP_DELAY: u64 = 300; // 5 minutes
+
+// Peak hours: 18:00 - 21:00 UTC
+const PEAK_HOUR_START: u64 = 18 * HOUR_IN_SECONDS; // 64800 seconds
+const PEAK_HOUR_END: u64 = 21 * HOUR_IN_SECONDS; // 75600 seconds
+const PEAK_RATE_MULTIPLIER: i128 = 3; // 1.5x => stored as 3 (divide by 2)
+const RATE_PRECISION: i128 = 2; // Precision for rate calculations
+
+// XLM precision constants - XLM has 7 decimal places (0.0000001 minimum)
+const XLM_PRECISION: i128 = 10_000_000; // 10^7 for 7 decimal places
+const XLM_MINIMUM_INCREMENT: i128 = 1; // 1 stroop = 0.0000001 XLM
+
+// Dust detection constants
+const DUST_THRESHOLD: i128 = 1; // Less than 1 stroop is considered dust
+const GAS_BOUNTY_AMOUNT: i128 = 100_000; // 0.01 XLM bounty for dust sweepers
+const MAX_SWEEP_STREAMS_PER_CALL: u64 = 1000; // Prevent gas limit issues
+
+/// Round XLM amount to nearest minimum increment (0.0000001 XLM)
+/// This prevents value loss over time due to truncation
+fn round_xlm_to_minimum_increment(amount: i128) -> i128 {
+    // For positive amounts, round up on .5 or higher
+    // For negative amounts, round down on -.5 or lower
+    if amount >= 0 {
+        ((amount + XLM_MINIMUM_INCREMENT / 2) / XLM_MINIMUM_INCREMENT) * XLM_MINIMUM_INCREMENT
+    } else {
+        ((amount - XLM_MINIMUM_INCREMENT / 2) / XLM_MINIMUM_INCREMENT) * XLM_MINIMUM_INCREMENT
+    }
 }
 
 fn calculate_historical_average(usage_data: &UsageData, now: u64) -> i128 {
@@ -756,9 +664,62 @@ fn settle_claim_for_meter(
     meter.balance < threshold
 }
 
-fn should_pause_low_priority_stream(meter: &Meter, throttling_active: bool) -> bool {
-    // Only pause if throttling is active AND this is a low priority stream
-    throttling_active && meter.priority_index >= LOW_PRIORITY_THRESHOLD
+/// Check if a balance amount qualifies as dust (less than 1 stroop)
+fn is_dust_amount(amount: i128) -> bool {
+    amount > 0 && amount < XLM_MINIMUM_INCREMENT
+}
+
+/// Get admin address or panic if not set
+fn get_admin_or_panic(env: &Env) -> Address {
+    match env
+        .storage()
+        .instance()
+        .get::<DataKey, Address>(&DataKey::AdminAddress)
+    {
+        Some(admin) => admin,
+        None => panic_with_error!(env, ContractError::UnauthorizedAdmin),
+    }
+}
+
+/// Check if caller is authorized admin
+fn require_admin_auth(env: &Env) {
+    let admin = get_admin_or_panic(env);
+    admin.require_auth();
+}
+
+/// Get or create dust aggregation for a specific token
+fn get_or_create_dust_aggregation(env: &Env, token_address: &Address) -> DustAggregation {
+    env.storage()
+        .instance()
+        .get::<DataKey, DustAggregation>(&DataKey::DustAggregation(token_address.clone()))
+        .unwrap_or(DustAggregation {
+            total_dust: 0,
+            stream_count: 0,
+            last_updated: env.ledger().timestamp(),
+        })
+}
+
+/// Update dust aggregation for a token
+fn update_dust_aggregation(env: &Env, token_address: &Address, dust_amount: i128, stream_count_delta: u64) {
+    let mut aggregation = get_or_create_dust_aggregation(env, token_address);
+    aggregation.total_dust = aggregation.total_dust.saturating_add(dust_amount);
+    aggregation.stream_count = aggregation.stream_count.saturating_add(stream_count_delta);
+    aggregation.last_updated = env.ledger().timestamp();
+    
+    env.storage()
+        .instance()
+        .set(&DataKey::DustAggregation(token_address.clone()), &aggregation);
+}
+
+fn get_meter_or_panic(env: &Env, meter_id: u64) -> Meter {
+    match env
+        .storage()
+        .instance()
+        .get::<DataKey, Meter>(&DataKey::Meter(meter_id))
+    {
+        Some(meter) => meter,
+        None => panic_with_error!(env, ContractError::MeterNotFound),
+    }
 }
 
 // --- Helpers ---
@@ -1339,6 +1300,37 @@ impl UtilityContract {
         env.storage()
             .instance()
             .set(&DataKey::ProtocolFeeBps, &fee_bps);
+    }
+
+    /// Set admin address for dust sweeper authorization
+    pub fn set_admin(env: Env, admin_address: Address) {
+        env.current_contract_address().require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminAddress, &admin_address);
+    }
+
+    /// Add funds to gas bounty pool for dust sweepers
+    pub fn fund_gas_bounty(env: Env, amount: i128) {
+        require_admin_auth(&env);
+        
+        if amount <= 0 {
+            panic_with_error!(&env, ContractError::InvalidTokenAmount);
+        }
+
+        let current_bounty = env
+            .storage()
+            .instance()
+            .get::<DataKey, i128>(&DataKey::GasBountyPool)
+            .unwrap_or(0);
+        
+        let updated_bounty = current_bounty.saturating_add(amount);
+        env.storage()
+            .instance()
+            .set(&DataKey::GasBountyPool, &updated_bounty);
+
+        env.events()
+            .publish(symbol_short!("BountyFunded"), amount);
     }
 
     pub fn add_supported_token(env: Env, token: Address) {
@@ -4941,6 +4933,143 @@ let milestone = MaintenanceMilestone {
             status.privacy_enabled
         } else {
             None
+        }
+    }
+
+    /// Sweep dust from depleted continuous flow streams
+    /// Only works on streams with < 1 stroop balance that are depleted or paused
+    /// Requires admin auth or sufficient gas bounty
+    pub fn sweep_dust(env: Env, token_address: Address, max_streams: Option<u64>) -> DustCollectedEvent {
+        let caller = env.invoker(); // Use invoker() instead of current_contract_address()
+        let is_admin = {
+            match env.storage().instance().get::<DataKey, Address>(&DataKey::AdminAddress) {
+                Some(admin) => admin == caller,
+                None => false,
+            }
+        };
+
+        if !is_admin {
+            let bounty_pool = env
+                .storage()
+                .instance()
+                .get::<DataKey, i128>(&DataKey::GasBountyPool)
+                .unwrap_or(0);
+            
+            if bounty_pool < GAS_BOUNTY_AMOUNT {
+                panic_with_error!(&env, ContractError::InsufficientGasBounty);
+            }
+            
+            // Non-admin callers need to authenticate themselves
+            caller.require_auth();
+        }
+
+        let max_to_process = max_streams.unwrap_or(MAX_SWEEP_STREAMS_PER_CALL).min(MAX_SWEEP_STREAMS_PER_CALL);
+        let mut total_dust_swept = 0i128;
+        let mut streams_swept = 0u64;
+        let current_timestamp = env.ledger().timestamp();
+
+        let total_streams = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::Count)
+            .unwrap_or(0);
+
+        for stream_id in 1..=total_streams.min(max_to_process) {
+            if let Some(mut flow) = env.storage()
+                .instance()
+                .get::<DataKey, ContinuousFlow>(&DataKey::ContinuousFlow(stream_id))
+            {
+                // Update flow calculation first
+                let accumulation = calculate_flow_accumulation(&flow, current_timestamp);
+                let current_balance = flow.accumulated_balance.saturating_sub(accumulation);
+                
+                // Check if stream qualifies for dust sweeping
+                if (flow.status == StreamStatus::Depleted || flow.status == StreamStatus::Paused) 
+                    && is_dust_amount(current_balance) {
+                    
+                    total_dust_swept = total_dust_swept.saturating_add(current_balance);
+                    streams_swept += 1;
+                    
+                    // Clear the dust from the stream
+                    flow.accumulated_balance = 0;
+                    flow.last_flow_timestamp = current_timestamp;
+                    
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::ContinuousFlow(stream_id), &flow);
+                }
+            }
+        }
+
+        if total_dust_swept == 0 {
+            panic_with_error!(&env, ContractError::NoDustToSweep);
+        }
+
+        // Transfer dust to protocol treasury (maintenance wallet)
+        if let Some(treasury) = env.storage().instance().get::<DataKey, Address>(&DataKey::MaintenanceWallet) {
+            transfer_tokens(&env, &token_address, &env.current_contract_address(), &treasury, &total_dust_swept);
+        }
+
+        // Update dust aggregation
+        update_dust_aggregation(&env, &token_address, total_dust_swept, streams_swept);
+
+        // Pay gas bounty if not admin
+        if !is_admin {
+            let current_bounty = env
+                .storage()
+                .instance()
+                .get::<DataKey, i128>(&DataKey::GasBountyPool)
+                .unwrap_or(0);
+            
+            let updated_bounty = current_bounty.saturating_sub(GAS_BOUNTY_AMOUNT);
+            env.storage()
+                .instance()
+                .set(&DataKey::GasBountyPool, &updated_bounty);
+
+            transfer_tokens(&env, &token_address, &env.current_contract_address(), &caller, &GAS_BOUNTY_AMOUNT);
+        }
+
+        let event = DustCollectedEvent {
+            token_address: token_address.clone(),
+            total_dust_swept,
+            streams_swept,
+            timestamp: current_timestamp,
+            sweeper_address: caller,
+        };
+
+        env.events()
+            .publish(symbol_short!("DustCollected"), (
+                token_address,
+                total_dust_swept,
+                streams_swept,
+                current_timestamp,
+                caller
+            ));
+
+        event
+    }
+
+    /// Get dust aggregation data for a specific token
+    pub fn get_dust_aggregation(env: Env, token_address: Address) -> Option<DustAggregation> {
+        env.storage()
+            .instance()
+            .get::<DataKey, DustAggregation>(&DataKey::DustAggregation(token_address))
+    }
+
+    /// Check if a specific stream has dust balance
+    pub fn has_dust(env: Env, stream_id: u64) -> bool {
+        if let Some(flow) = env.storage()
+            .instance()
+            .get::<DataKey, ContinuousFlow>(&DataKey::ContinuousFlow(stream_id))
+        {
+            let current_timestamp = env.ledger().timestamp();
+            let accumulation = calculate_flow_accumulation(&flow, current_timestamp);
+            let current_balance = flow.accumulated_balance.saturating_sub(accumulation);
+            
+            (flow.status == StreamStatus::Depleted || flow.status == StreamStatus::Paused) 
+                && is_dust_amount(current_balance)
+        } else {
+            false
         }
     }
 }
