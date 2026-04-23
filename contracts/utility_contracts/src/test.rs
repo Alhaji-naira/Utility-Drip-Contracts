@@ -326,7 +326,9 @@ fn test_minimum_increment_billing_rounding() {
     let oracle_client = MockPriceOracleContractClient::new(&env, &oracle_address);
     oracle_client.init(&10, &7); // 10 cents per XLM, 7 decimals
 
-    client.set_oracle(&oracle_address);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_oracle(&admin, &oracle_address);
 
     // Test case 1: Small amounts that require rounding
     let meter_id = client.register_meter(
@@ -392,7 +394,9 @@ fn test_xlm_precision_rounding_edge_cases() {
     let oracle_client = MockPriceOracleContractClient::new(&env, &oracle_address);
     oracle_client.init(&13, &7); // 13 cents per XLM
 
-    client.set_oracle(&oracle_address);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_oracle(&admin, &oracle_address);
 
     let user = Address::generate(&env);
     let provider = Address::generate(&env);
@@ -1191,7 +1195,9 @@ fn test_carbon_credit_payment() {
     let meter_id = client.register_meter(&user, &provider, &rate, &default_token_address);
 
     // 2. Add Carbon Credit token as supported
-    client.add_supported_token(&eco_token_address);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.add_supported_token(&admin, &eco_token_address);
 
     // 3. Top up using Carbon Credits
     client.top_up_with_token(&meter_id, &1000, &eco_token_address);
@@ -1323,7 +1329,9 @@ fn test_xlm_to_usd_conversion_top_up() {
 
     // Create mock oracle with $1.50 per XLM (150 cents)
     let mock_oracle = MockPriceOracle::new(&env, 150, 2);
-    client.set_oracle(&mock_oracle.address());
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_oracle(&admin, &mock_oracle.address());
 
     // Use native token (XLM) - registered as a SAC in tests
     let xlm_admin = Address::generate(&env);
@@ -1456,7 +1464,9 @@ fn test_admin_fee_collection() {
     let meter_id = client.register_meter(&user, &provider, &rate, &default_token_address);
 
     // 2. Add Carbon Credit token as supported
-    client.add_supported_token(&eco_token_address);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.add_supported_token(&admin, &eco_token_address);
 
     // 3. Top up using Carbon Credits
     client.top_up_with_token(&meter_id, &1000, &eco_token_address);
@@ -1487,7 +1497,9 @@ fn test_unsupported_token_payment() {
 
     // Create mock oracle with $2.00 per XLM (200 cents)
     let mock_oracle = MockPriceOracle::new(&env, 200, 2);
-    client.set_oracle(&mock_oracle.address());
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_oracle(&admin, &mock_oracle.address());
 
     let xlm_admin = Address::generate(&env);
     let xlm_address = env
@@ -1536,7 +1548,9 @@ fn test_get_current_rate() {
 
     // Set oracle
     let mock_oracle = MockPriceOracle::new(&env, 175, 2);
-    client.set_oracle(&mock_oracle.address());
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_oracle(&admin, &mock_oracle.address());
 
     // Now should return rate
     let rate = client.get_current_rate().unwrap();
@@ -1545,20 +1559,22 @@ fn test_get_current_rate() {
     let maintenance_wallet = Address::generate(&env);
 
     let oracle = Address::generate(&env);
-    client.set_oracle(&oracle);
+    client.set_oracle(&admin, &oracle);
 
     let token_admin = Address::generate(&env);
     let token_address = env.register_stellar_asset_contract(token_admin.clone());
     let token = token::Client::new(&env, &token_address);
     let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
 
+    let user = Address::generate(&env);
     token_admin_client.mint(&user, &2000);
 
     // Configure fee: 50 bps = 0.5%
-    client.set_maintenance_config(&maintenance_wallet, &50);
+    client.set_maintenance_config(&admin, &maintenance_wallet, &50);
 
+    let provider = Address::generate(&env);
     let rate = 10;
-    let meter_id = client.register_meter(&user, &provider, &rate, &token_address);
+    let meter_id = client.register_meter(&user, &provider, &rate, &token_address, &BytesN::from_array(&env, &[0; 32]));
     client.top_up(&meter_id, &1000);
 
     client.deduct_units(&meter_id, &20); // Cost: 200
