@@ -175,6 +175,19 @@ pub struct WithdrawalRequest {
 }
 
 #[contracttype]
+#[derive(Clone)]
+pub struct FeeChangeProposal {
+    pub proposal_id: u64,
+    pub proposed_fee_bps: i128,
+    pub proposed_at: u64,
+    pub voting_deadline: u64,
+    pub votes_for: i128,
+    pub votes_against: i128,
+    pub is_executed: bool,
+    pub proposer: Address,
+}
+
+#[contracttype]
 pub enum DataKey {
     Meter(u64),
     Count,
@@ -227,6 +240,10 @@ pub enum DataKey {
     WithdrawalRequest(Address, u64),   // Provider address, request ID -> WithdrawalRequest
     WithdrawalRequestCount(Address),   // Provider address -> request counter
     WithdrawalApproval(Address, u64, Address), // Provider, request ID, signer -> bool
+    // Task #104: Usage-Based Governance
+    FeeChangeProposal(u64),
+    FeeChangeVote(Address, u64),
+    FeeProposalCount,
 }
 
 #[contracterror]
@@ -305,6 +322,11 @@ pub enum ContractError {
     NotApprovedByWallet = 60,
     AmountBelowMultiSigThreshold = 61,
     MultiSigRequiredForAmount = 62,
+    // Task #104: Usage-Based Governance
+    FeeProposalNotFound = 63,
+    FeeProposalVotingEnded = 64,
+    FeeProposalNotReady = 65,
+    FeeProposalAlreadyExecuted = 66,
 }
 
 #[contracttype]
@@ -3825,6 +3847,98 @@ impl UtilityContract {
             .instance()
             .get(&DataKey::WithdrawalRequestCount(provider))
             .unwrap_or(0)
+    }
+
+    // ============================================================================
+    // Task #104: Usage-Based Governance (Proportional Voter Weight)
+    // ============================================================================
+    
+    pub fn propose_fee_change(env: Env, proposer: Address, proposed_fee_bps: i128) -> u64 {
+        proposer.require_auth();
+
+        let proposal_id: u64 = env.storage().instance().get(&DataKey::FeeProposalCount).unwrap_or(0);
+        let next_proposal_id = proposal_id + 1;
+        env.storage().instance().set(&DataKey::FeeProposalCount, &next_proposal_id);
+
+        let now = env.ledger().timestamp();
+        let proposal = FeeChangeProposal {
+            proposal_id: next_proposal_id,
+            proposed_fee_bps,
+            proposed_at: now,
+            voting_deadline: now + (7 * DAY_IN_SECONDS),
+            votes_for: 0,
+            votes_against: 0,
+            is_executed: false,
+            proposer: proposer.clone(),
+        };
+
+        env.storage().instance().set(&DataKey::FeeChangeProposal(next_proposal_id), &proposal);
+        
+        env.events().publish((symbol_short!("FeeProp"), next_proposal_id), proposed_fee_bps);
+        
+        next_proposal_id
+    }
+
+    pub fn vote_for_fee_change(env: Env, meter_id: u64, proposal_id: u64, support: bool) {
+        let meter = get_meter_or_panic(&env, meter_id);
+        meter.user.require_auth();
+
+        let mut proposal: FeeChangeProposal = env.storage().instance()
+            .get(&DataKey::FeeChangeProposal(proposal_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::FeeProposalNotFound));
+
+        if env.ledger().timestamp() > proposal.voting_deadline {
+            panic_with_error!(&env, ContractError::FeeProposalVotingEnded);
+        }
+
+        let vote_key = DataKey::FeeChangeVote(meter.user.clone(), proposal_id);
+        if env.storage().instance().has(&vote_key) {
+            panic_with_error!(&env, ContractError::AlreadyVoted);
+        }
+
+        // Calculate voting weight based on monthly volume as a proxy for the last 6 months.
+        let voting_weight = meter.usage_data.monthly_volume.saturating_mul(6);
+
+        if support {
+            proposal.votes_for = proposal.votes_for.saturating_add(voting_weight);
+        } else {
+            proposal.votes_against = proposal.votes_against.saturating_add(voting_weight);
+        }
+
+        env.storage().instance().set(&DataKey::FeeChangeProposal(proposal_id), &proposal);
+        env.storage().instance().set(&vote_key, &true);
+
+        env.events().publish(
+            (symbol_short!("FeeVote"), proposal_id),
+            (meter.user, support, voting_weight)
+        );
+    }
+
+    pub fn execute_fee_change(env: Env, proposal_id: u64) {
+        let mut proposal: FeeChangeProposal = env.storage().instance()
+            .get(&DataKey::FeeChangeProposal(proposal_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::FeeProposalNotFound));
+
+        if env.ledger().timestamp() <= proposal.voting_deadline {
+            panic_with_error!(&env, ContractError::FeeProposalNotReady);
+        }
+
+        if proposal.is_executed {
+            panic_with_error!(&env, ContractError::FeeProposalAlreadyExecuted);
+        }
+
+        // Simple majority logic
+        if proposal.votes_for > proposal.votes_against {
+            env.storage().instance().set(&DataKey::ProtocolFeeBps, &proposal.proposed_fee_bps);
+        }
+
+        proposal.is_executed = true;
+        env.storage().instance().set(&DataKey::FeeChangeProposal(proposal_id), &proposal);
+
+        env.events().publish(
+            (symbol_short!("FeeExec"), proposal_id),
+            (proposal.proposed_fee_bps, proposal.votes_for > proposal.votes_against)
+        );
     }
 }
 
